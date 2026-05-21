@@ -39,20 +39,10 @@ A full-stack application for querying Bill of Materials (BOM) documents using FA
 |------|---------|-------|
 | Python | 3.11+ | For local (non-Docker) backend |
 | Node.js | 20+ | For local (non-Docker) frontend |
-| Git | Latest | Version control — install from https://git-scm.com/download/win |
 | Docker & Docker Compose | Latest | For Docker-based setup |
 | Ollama | Latest | Must run on the host at port `11434` |
 
-### Install Git (Windows)
-
-```powershell
-# Via winget (recommended)
-winget install --id Git.Git -e --source winget
-
-# Then close and reopen PowerShell, and verify:
-git --version
-```
-
+>>>>>>> 55eaea5b4440585cfec29f4892a2368e45d61b94
 ### Install & start Ollama
 
 Download from https://ollama.com, then start the Ollama service:
@@ -185,9 +175,13 @@ npm start
 
 Frontend available at http://localhost:3000
 
+
 > **How the connection works (no Docker needed):** `frontend/package.json` has a `"proxy": "http://localhost:8000"` entry. When running `npm start`, the CRA dev server automatically forwards every API call (`/files`, `/upload`, `/query`, etc.) to the backend on port 8000. The `frontend/.env.development` file sets `REACT_APP_API_URL=` (empty) so the app uses relative paths — no hardcoded URLs, no CORS issues.
 >
 > This means as long as `uvicorn` is running on port 8000, the frontend and backend are connected — no containers required.
+
+ The frontend is pre-configured to call the backend at `http://localhost:8000` via the `REACT_APP_API_URL` environment variable.
+
 
 ---
 
