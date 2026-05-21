@@ -3,10 +3,10 @@ import * as XLSX from 'xlsx';
 import {
   Button, Typography, LinearProgress, Paper, TextField,
   Alert, Chip, CircularProgress, Divider, Container, Stack,
-  Select, MenuItem, FormControl, InputLabel, Tooltip
+  Select, MenuItem, FormControl, InputLabel, Tooltip, IconButton, Box
 } from "@mui/material";
 import {
-  CloudUpload, Search, Download, Autorenew
+  CloudUpload, Search, Download, Autorenew, InfoOutlined
 } from "@mui/icons-material";
 
 
@@ -113,6 +113,8 @@ function App() {
     // Set column widths for readability
     worksheet["!cols"] = [
       { wch: 8 },   // BOM No
+      { wch: 22 },  // Parent Part Number
+      { wch: 18 },  // LibRef
       { wch: 20 },  // Requested Part
       { wch: 15 },  // ComID
       { wch: 30 },  // Manufacturer Part Number
@@ -130,28 +132,31 @@ function App() {
     ];
 
     // Apply conditional formatting: red background for YEOL < 10
-    data.forEach((row, idx) => {
-      const rowIndex = idx + 2; // +2 because row 1 is header, data starts at row 2
-      const yeolValue = parseFloat(row.YEOL);
-      
-      if (!isNaN(yeolValue) && yeolValue < 10) {
-        // Apply red fill to all cells in this row
-        const columns = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O'];
-        columns.forEach(col => {
-          const cellAddress = `${col}${rowIndex}`;
-          if (!worksheet[cellAddress]) return;
-          
-          worksheet[cellAddress].s = {
-            fill: {
-              fgColor: { rgb: "FF0000" } // Red background
-            },
-            font: {
-              color: { rgb: "FFFFFF" } // White text for contrast
-            }
-          };
-        });
-      }
-    });
+    // Skip for large datasets (>500 rows) — cell-by-cell mutation freezes the browser
+    if (data.length <= 500) {
+      data.forEach((row, idx) => {
+        const rowIndex = idx + 2; // +2 because row 1 is header, data starts at row 2
+        const yeolValue = parseFloat(row.YEOL);
+        
+        if (!isNaN(yeolValue) && yeolValue < 10) {
+          // Apply red fill to all cells in this row
+          const columns = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q'];
+          columns.forEach(col => {
+            const cellAddress = `${col}${rowIndex}`;
+            if (!worksheet[cellAddress]) return;
+            
+            worksheet[cellAddress].s = {
+              fill: {
+                fgColor: { rgb: "FF0000" } // Red background
+              },
+              font: {
+                color: { rgb: "FFFFFF" } // White text for contrast
+              }
+            };
+          });
+        }
+      });
+    }
 
     const workbook = XLSX.utils.book_new();
 
@@ -452,6 +457,49 @@ const handleQuery = async (e) => {
           >
             {ocrPolling ? "Processing…" : "Upload"}
           </Button>
+
+          <Tooltip
+            title={
+              <Box sx={{ p: 0.5, minWidth: 220 }}>
+                <Typography
+                  variant="caption"
+                  sx={{ fontWeight: 700, fontSize: "0.75rem", display: "block",
+                    borderBottom: "1px solid rgba(255,255,255,0.25)", pb: 0.75, mb: 1 }}
+                >
+                  Supported File Types
+                </Typography>
+                {[
+                  { icon: "📄", label: "PDF",        exts: ".pdf" },
+                  { icon: "📝", label: "Text",       exts: ".txt, .text" },
+                  { icon: "📊", label: "Excel",      exts: ".xlsx, .xls" },
+                  { icon: "🗂️", label: "CSV",        exts: ".csv" },
+                  { icon: "📘", label: "Word",       exts: ".docx, .doc" },
+                  { icon: "📑", label: "PowerPoint", exts: ".pptx, .ppt" },
+                  { icon: "🖼️", label: "Images",     exts: ".png .jpg .jpeg .bmp .tiff .gif .webp" },
+                ].map(({ icon, label, exts }) => (
+                  <Box key={label} sx={{ display: "flex", alignItems: "baseline", gap: 0.75, mb: 0.5 }}>
+                    <span style={{ fontSize: "0.8rem" }}>{icon}</span>
+                    <Typography variant="caption" sx={{ fontWeight: 600, minWidth: 82, fontSize: "0.72rem" }}>
+                      {label}
+                    </Typography>
+                    <Typography variant="caption" sx={{ opacity: 0.75, fontSize: "0.68rem", fontFamily: "monospace" }}>
+                      {exts}
+                    </Typography>
+                  </Box>
+                ))}
+              </Box>
+            }
+            placement="right"
+            arrow
+            componentsProps={{
+              tooltip: { sx: { maxWidth: 280, bgcolor: "grey.900", fontSize: "0.75rem" } },
+              arrow:   { sx: { color: "grey.900" } }
+            }}
+          >
+            <IconButton size="small" color="info" aria-label="supported file types">
+              <InfoOutlined fontSize="small" />
+            </IconButton>
+          </Tooltip>
         </Stack>
 
         {/* Progress bar — orange during OCR, blue otherwise */}

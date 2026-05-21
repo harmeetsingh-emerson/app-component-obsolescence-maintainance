@@ -915,6 +915,17 @@ def _extract_parts_by_columns(lines: List[str], col_map: dict) -> List[Dict]:
     desig_cols    = col_map['desig_cols']
     mfr_mpn_pairs = col_map['mfr_mpn_pairs']
 
+    # Pre-compute used column indices and header cells for extra_fields capture
+    _hdr_cells = _cells_from_line(lines[hdr]) if hdr < len(lines) else []
+    _used_ocr_cols = (
+        ({part_col} if part_col is not None else set())
+        | set(desc_cols)
+        | set(qty_cols)
+        | set(desig_cols)
+        | {mc for mc, _ in mfr_mpn_pairs}
+        | {pc for _, pc in mfr_mpn_pairs if pc is not None}
+    )
+
     def _flush_pending_to(target_part: Dict) -> None:
         """Attach all pending floating mfr blocks to target_part."""
         for pending_list in pending_mfr_rows:
@@ -1099,6 +1110,15 @@ def _extract_parts_by_columns(lines: List[str], col_map: dict) -> List[Dict]:
             (cells[i] for i in desig_cols if i < len(cells) and cells[i]), ''
         )
 
+        # Capture columns not consumed by the structured parser into extra_fields
+        _extra_ocr: dict = {}
+        for _ci, _hcell in enumerate(_hdr_cells):
+            if _ci not in _used_ocr_cols and _ci < len(cells):
+                _hkey = str(_hcell).strip()
+                _hval = cells[_ci].strip() if cells[_ci] else ""
+                if _hkey and _hval:
+                    _extra_ocr[_hkey] = _hval
+
         part = {
             'part_number': part_number,
             'description': description,
@@ -1109,6 +1129,8 @@ def _extract_parts_by_columns(lines: List[str], col_map: dict) -> List[Dict]:
             'page_number': 1,
             'source': 'paddle_ocr_columnar',
         }
+        if _extra_ocr:
+            part['extra_fields'] = _extra_ocr
         parts.append(part)
         last_part = part
 
@@ -1990,7 +2012,16 @@ def parse_pipe_separated_bom(ocr_text: str) -> List[Dict]:
                     })
         
         if manufacturers:
-            parts.append({
+            # Capture non-structured columns into extra_fields
+            _used_pipe = set(column_map.values())
+            _extra_pipe: dict = {}
+            for _ci, _hdr_name in enumerate(header_row):
+                if _ci not in _used_pipe and _ci < len(cells):
+                    _val = cells[_ci].strip() if cells[_ci] else ""
+                    if _hdr_name and _val:
+                        _extra_pipe[_hdr_name] = _val
+
+            _part = {
                 'part_number': part_number,
                 'description': description,
                 'manufacturers': manufacturers,
@@ -1999,7 +2030,10 @@ def parse_pipe_separated_bom(ocr_text: str) -> List[Dict]:
                 'confidence': 0.7,
                 'page_number': 1,
                 'source': 'ocr'
-            })
+            }
+            if _extra_pipe:
+                _part['extra_fields'] = _extra_pipe
+            parts.append(_part)
     
     print(f"[OCR Parser] Extracted {len(parts)} parts from OCR text")
     

@@ -17,6 +17,7 @@ from app.bom_parser_v2 import parse_bom_document
 from app.faiss_bom_store import get_faiss_store
 from app.multi_agent_faiss import get_orchestrator
 from app.ocr_processor import parse_ocr_bom_text
+from app.file_converters import convert_and_parse, get_file_type, SUPPORTED_EXTENSIONS, IMAGE_EXTENSIONS
 from app.ocr_store import (
     append_ocr_extraction,
     search_ocr_extraction,
@@ -211,11 +212,14 @@ async def upload_document(
     Upload a BOM document.
 
     Routing logic:
-    - .txt  → treated as pre-extracted OCR text, parsed and stored in FAISS.
-    - .pdf (text-based) → parsed with pdfplumber, parts stored in FAISS.
-    - .pdf (image-based / needs OCR) → OCR runs in the background; raw text
-      is saved to ocr_outputs/ocr_extraction.txt instead of FAISS so the
-      upload returns immediately without a long-running OCR timeout.
+    - .pdf (text-based)  → pdfplumber parser → FAISS
+    - .pdf (image-based) → PaddleOCR background task → ocr_extraction.txt
+    - .txt / .text       → pre-extracted OCR text → FAISS
+    - .xlsx / .xls       → openpyxl table parser → FAISS
+    - .csv               → csv parser → FAISS
+    - .docx / .doc       → python-docx table parser → FAISS
+    - .pptx / .ppt       → python-pptx table parser → FAISS
+    - .png/.jpg/.jpeg/.bmp/.tiff/.gif/.webp → PaddleOCR on image → FAISS
     """
     try:
         # ── Save uploaded file ────────────────────────────────────────────
@@ -225,8 +229,9 @@ async def upload_document(
             fh.write(content)
         print(f"\n[Upload] Saved file: {file.filename}")
 
-        is_txt = file.filename.lower().endswith(".txt")
-        is_pdf = file.filename.lower().endswith(".pdf")
+        fname_lower = file.filename.lower()
+        is_txt = fname_lower.endswith(".txt") or fname_lower.endswith(".text")
+        is_pdf = fname_lower.endswith(".pdf")
 
         # ── .txt: parse as pre-extracted OCR text → FAISS ─────────────────
         if is_txt:
@@ -282,7 +287,6 @@ async def upload_document(
                 parts = []
 
             if parts:
-                # Text-based PDF parsed successfully → store in FAISS
                 total_mfr = sum(len(p.get("manufacturers", [])) for p in parts)
                 store = get_faiss_store()
                 store.add_parts(parts, source_file=file.filename)
@@ -300,7 +304,6 @@ async def upload_document(
 
             # No parts from text extraction — check if image-based
             if _pdf_needs_ocr(file_path):
-                # Image-based PDF: run OCR in background, return immediately
                 background_tasks.add_task(_run_ocr_and_store, file_path, file.filename, ocr_dpi)
                 return JSONResponse(
                     status_code=202,
@@ -318,7 +321,6 @@ async def upload_document(
                     },
                 )
 
-            # Text-based PDF but no BOM data found
             return JSONResponse(
                 status_code=400,
                 content={
@@ -334,13 +336,95 @@ async def upload_document(
                 },
             )
 
+        # ── Excel / CSV / Word / PowerPoint / Image ────────────────────────
+        file_type = get_file_type(file.filename)
+        if file_type is not None:
+            try:
+                parts = convert_and_parse(file_path, file.filename)
+            except Exception as exc:
+                import traceback
+                traceback.print_exc()
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "success": False,
+                        "filename": file.filename,
+                        "message": f"Failed to process file: {str(exc)}",
+                    },
+                )
+
+            # ── Raw-row fallback for Excel/CSV when BOM structure not detected ──
+            raw_fallback = False
+            if not parts and file_type in ("excel", "csv"):
+                print(f"[Upload] Structured BOM parsing returned 0 parts — trying raw-row fallback")
+                try:
+                    if file_type == "excel":
+                        from app.file_converters import parse_excel_raw_rows
+                        parts = parse_excel_raw_rows(file_path)
+                    elif file_type == "csv":
+                        from app.file_converters import _table_to_raw_row_parts
+                        import csv as _csv
+                        table: list = []
+                        with open(file_path, newline="", encoding="utf-8-sig") as fh:
+                            sample = fh.read(4096); fh.seek(0)
+                            try:
+                                import csv as _csv2
+                                dialect = _csv2.Sniffer().sniff(sample)
+                            except Exception:
+                                dialect = _csv.excel
+                            for row in _csv.reader(fh, dialect):
+                                table.append([c.strip() for c in row])
+                        parts = _table_to_raw_row_parts(table, file.filename, 1)
+                    raw_fallback = bool(parts)
+                except Exception as exc2:
+                    import traceback; traceback.print_exc()
+                    print(f"[Upload] Raw-row fallback failed: {exc2}")
+
+            if parts:
+                total_mfr = sum(len(p.get("manufacturers", [])) for p in parts)
+                store = get_faiss_store()
+                store.add_parts(parts, source_file=file.filename)
+                msg = (
+                    f"Indexed {len(parts)} rows from '{file.filename}' as raw text "
+                    f"(BOM structure not detected — stored for semantic search)."
+                    if raw_fallback else
+                    f"Successfully extracted {len(parts)} parts with {total_mfr} "
+                    f"manufacturer options from {file.filename}"
+                )
+                return {
+                    "success": True,
+                    "filename": file.filename,
+                    "parts_extracted": len(parts),
+                    "total_manufacturer_options": total_mfr,
+                    "storage": "faiss",
+                    "raw_row_fallback": raw_fallback,
+                    "message": msg,
+                }
+
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "filename": file.filename,
+                    "parts_extracted": 0,
+                    "message": (
+                        f"No content could be extracted from '{file.filename}'. "
+                        "Ensure the file contains a table or data rows."
+                    ),
+                },
+            )
+
         # ── Unsupported file type ──────────────────────────────────────────
         return JSONResponse(
             status_code=400,
             content={
                 "success": False,
                 "filename": file.filename,
-                "message": "Unsupported file type. Please upload a .pdf or .txt file.",
+                "message": (
+                    "Unsupported file type. Supported formats: "
+                    ".pdf, .txt, .xlsx, .xls, .csv, .docx, .pptx, "
+                    ".png, .jpg, .jpeg, .bmp, .tiff, .gif, .webp"
+                ),
             },
         )
 
@@ -776,6 +860,7 @@ async def query_endpoint(request: Request):
             or (want_all and not has_real_filter)
             or bool(specific_parts)          # internal BOM# ≠ MPN in table, would mismatch
             or len(excel_rows) == 1          # trivially correct, no filtering needed
+            or len(excel_rows) > 200         # too large for LLM review — would take minutes
         )
         if not skip_review:
             from app.multi_agent_faiss import ResponseReviewerAgent
@@ -793,17 +878,23 @@ async def query_endpoint(request: Request):
                     # Build formatted_response directly from filtered excel rows
                     lines = [f"Found {len(filtered_excel)} matching row(s) for your query:"]
                     for _row in filtered_excel:
-                        _bom  = _row.get('BOM No', '?')
-                        _part = _row.get("Requested Part", "")
-                        _mpn  = _row.get("Manufacturer Part Number", "") or _part
-                        _mfr  = _row.get("Manufacturer Name", "")
-                        _desc = _row.get("Description", "")
-                        _yeol = _row.get("YEOL", "")
-                        _eol  = _row.get("EOL", "")
-                        _rohs = _row.get("RoHS", "")
-                        _ds   = _row.get("Datasheet", "")
-                        _plnm = _row.get("PlName", "")
+                        _bom    = _row.get('BOM No', '?')
+                        _parent = _row.get("Parent Part Number", "")
+                        _libref = _row.get("LibRef", "")
+                        _part   = _row.get("Requested Part", "")
+                        _mpn    = _row.get("Manufacturer Part Number", "") or _part
+                        _mfr    = _row.get("Manufacturer Name", "")
+                        _desc   = _row.get("Description", "")
+                        _yeol   = _row.get("YEOL", "")
+                        _eol    = _row.get("EOL", "")
+                        _rohs   = _row.get("RoHS", "")
+                        _ds     = _row.get("Datasheet", "")
+                        _plnm   = _row.get("PlName", "")
                         lines.append(f"\n  ─── BOM# {_bom} ───────────────────────────────")
+                        if _parent and _parent != _mpn:
+                            lines.append(f"  Parent Part    : {_parent}")
+                        if _libref:
+                            lines.append(f"  LibRef         : {_libref}")
                         lines.append(f"  Requested Part : {_part}")
                         lines.append(f"  MPN            : {_mpn}")
                         lines.append(f"  Manufacturer   : {_mfr}")
@@ -836,17 +927,23 @@ async def query_endpoint(request: Request):
         elif skip_review and excel_rows and result.get("success"):
             lines = [f"Found {len(excel_rows)} matching row(s) for your query:"]
             for _row in excel_rows:
-                _bom  = _row.get("BOM No", "?")
-                _part = _row.get("Requested Part", "")
-                _mpn  = _row.get("Manufacturer Part Number", "") or _part
-                _mfr  = _row.get("Manufacturer Name", "")
-                _desc = _row.get("Description", "")
-                _yeol = _row.get("YEOL", "")
-                _eol  = _row.get("EOL", "")
-                _rohs = _row.get("RoHS", "")
-                _ds   = _row.get("Datasheet", "")
-                _plnm = _row.get("PlName", "")
+                _bom    = _row.get("BOM No", "?")
+                _parent = _row.get("Parent Part Number", "")
+                _libref = _row.get("LibRef", "")
+                _part   = _row.get("Requested Part", "")
+                _mpn    = _row.get("Manufacturer Part Number", "") or _part
+                _mfr    = _row.get("Manufacturer Name", "")
+                _desc   = _row.get("Description", "")
+                _yeol   = _row.get("YEOL", "")
+                _eol    = _row.get("EOL", "")
+                _rohs   = _row.get("RoHS", "")
+                _ds     = _row.get("Datasheet", "")
+                _plnm   = _row.get("PlName", "")
                 lines.append(f"\n  ─── BOM# {_bom} ───────────────────────────────")
+                if _parent and _parent != _mpn:
+                    lines.append(f"  Parent Part    : {_parent}")
+                if _libref:
+                    lines.append(f"  LibRef         : {_libref}")
                 lines.append(f"  Requested Part : {_part}")
                 if _mpn != _part:
                     lines.append(f"  MPN            : {_mpn}")

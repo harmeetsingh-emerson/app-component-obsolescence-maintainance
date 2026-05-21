@@ -13,3 +13,6 @@ torch
 transformers
 PyMuPDF
 requests
+openpyxl
+python-pptx
+Pillow

@@ -67,6 +67,8 @@ COLUMN_MAPPINGS = {
         '2nd source', 'second source', '2nd mfr',
         'primary mfr', 'preferred mfr', 'preferred vendor',
         'source', 'make',
+        # JT BOM / Agile PLM style
+        'mfr. name', 'mfr name', 'manufacturers.mfr. name', 'manufacturers.mfr name',
     ],
     'mpn': [
         'mfgr p/n', 'manufacturer part number', 'mpn', 'mfg p/n', 'mfr p/n',
@@ -90,6 +92,10 @@ COLUMN_MAPPINGS = {
         'mfr part no', 'mfr part no.', 'mfr no',
         'vendor part', 'vendor part no', 'vendor part number',
         'catalog number', 'cat no', 'cat number', 'order code',
+        # JT BOM / Agile PLM style
+        'mfr part / cell / xref', 'mfr part / cell', 'cell / xref',
+        'mfr part', 'xref',
+        'manufacturers.mfr part / cell / xref', 'manufacturers.mfr part',
     ],
     'part_number': [
         'part number', 'p/n', 'pn', 'part no', 'part #', 'internal pn',
@@ -109,6 +115,7 @@ COLUMN_MAPPINGS = {
         'description', 'desc', 'part description', 'component description',
         'specification', 'component', 'details',
         'item description', 'component name', 'spec',
+        'subclass', 'class', 'category', 'type', 'sub class',
     ],
     'quantity': [
         'qty', 'quantity', 'qnty', 'amount', 'count',
@@ -267,6 +274,117 @@ KNOWN_MANUFACTURERS = load_manufacturers()
 # ============================================================================
 # BOM DETECTION & PARSING
 # ============================================================================
+
+# Token-based scoring weights per column semantic type
+_COLUMN_TYPE_TOKENS: Dict[str, Dict[str, set]] = {
+    'manufacturer': {
+        'strong':   {'name', 'vendor', 'brand', 'supplier', 'source', 'make'},
+        'medium':   {'manufacturer', 'manufacturers', 'mfgr', 'mfr'},
+        'penalize': {'part', 'xref', 'cell', 'pn', 'mpn', 'number', 'catalog', 'code', 'order'},
+    },
+    'mpn': {
+        'strong':   {'xref', 'cell', 'pn', 'mpn', 'catalog', 'code', 'order'},
+        'medium':   {'part', 'number', 'no'},
+        'penalize': {'name', 'vendor', 'brand', 'supplier'},
+    },
+    'part_number': {
+        'strong':   {'bom', 'internal', 'drawing', 'find', 'item', 'level'},
+        'medium':   {'part', 'number', 'pn', 'component', 'material', 'ref'},
+        'penalize': {'mfr', 'mfgr', 'manufacturer', 'manufacturers', 'vendor', 'name'},
+    },
+    'description': {
+        'strong':   {'description', 'desc', 'specification', 'spec', 'details',
+                     'subclass', 'class', 'category', 'type'},
+        'medium':   {'component', 'item'},
+        'penalize': set(),
+    },
+    'quantity': {
+        'strong':   {'qty', 'quantity', 'qnty', 'amount', 'count'},
+        'medium':   {'total', 'req', 'required'},
+        'penalize': set(),
+    },
+    'designators': {
+        'strong':   {'designator', 'designators', 'refdes', 'placement'},
+        'medium':   {'reference', 'ref', 'location', 'position'},
+        'penalize': set(),
+    },
+}
+
+
+def _score_header_for_type(header: str, semantic_type: str) -> float:
+    """Return a score (0-2+) indicating how well a column header matches a semantic type."""
+    import re as _re
+    tokens = set(_re.split(r'[\s/\.\-_,]+', header.lower()))
+    tokens.discard('')
+    weights = _COLUMN_TYPE_TOKENS.get(semantic_type, {})
+    score = 0.0
+    for t in tokens:
+        if t in weights.get('strong', set()):
+            score += 1.0
+        elif t in weights.get('medium', set()):
+            score += 0.5
+        if t in weights.get('penalize', set()):
+            score -= 0.5
+    return max(0.0, score)
+
+
+def _infer_columns_from_content(
+    table: List[List[str]],
+    header_row_idx: int,
+    column_map: Dict[str, int],
+    n_cols: int,
+) -> Dict[str, int]:
+    """
+    For columns not yet mapped, sample data rows and guess the semantic type
+    from cell contents (e.g. alphanumeric+dash → likely MPN).
+    Updates and returns a copy of column_map.
+    """
+    import re as _re
+    col_map = dict(column_map)
+    mapped_cols = set(col_map.values())
+
+    data_rows = table[header_row_idx + 1: header_row_idx + 7]  # sample up to 6 rows
+    if not data_rows:
+        return col_map
+
+    # Score each unmapped column
+    mpn_pattern    = _re.compile(r'^[A-Z0-9][A-Z0-9/+.\-]{3,}$', _re.IGNORECASE)
+    mfr_pattern    = _re.compile(r'^[A-Za-z][A-Za-z\s&,\.]{5,}$')
+
+    col_mpn_hits   = {}
+    col_mfr_hits   = {}
+
+    for row in data_rows:
+        for col_idx in range(n_cols):
+            if col_idx in mapped_cols:
+                continue
+            cell = str(row[col_idx]).strip() if col_idx < len(row) else ''
+            if not cell or cell.lower() in ('n/a', '-', 'none', ''):
+                continue
+            if mpn_pattern.match(cell) and ' ' not in cell:
+                col_mpn_hits[col_idx] = col_mpn_hits.get(col_idx, 0) + 1
+            if mfr_pattern.match(cell) and ' ' in cell:
+                col_mfr_hits[col_idx] = col_mfr_hits.get(col_idx, 0) + 1
+
+    # Assign best unambiguous hits (need ≥2 matching rows)
+    if 'mpn' not in col_map:
+        best_col = max(col_mpn_hits, key=col_mpn_hits.get, default=None)
+        if best_col is not None and col_mpn_hits[best_col] >= 2 and best_col not in mapped_cols:
+            col_map['mpn'] = best_col
+            mapped_cols.add(best_col)
+            print(f"[ContentInfer] Inferred mpn at col {best_col} "
+                  f"({col_mpn_hits[best_col]} hits)")
+
+    if 'manufacturer' not in col_map:
+        best_col = max(col_mfr_hits, key=col_mfr_hits.get, default=None)
+        if best_col is not None and col_mfr_hits[best_col] >= 2 and best_col not in mapped_cols:
+            col_map['manufacturer'] = best_col
+            mapped_cols.add(best_col)
+            print(f"[ContentInfer] Inferred manufacturer at col {best_col} "
+                  f"({col_mfr_hits[best_col]} hits)")
+
+    return col_map
+
 
 def detect_bom_structure(table: List[List[str]], page_num: int = 1) -> BOMTableDetection:
     """
@@ -541,6 +659,11 @@ def parse_bom_row(row: List[str], column_map: Dict[str, int], page_num: int) -> 
                 continue
             else:
                 break
+
+        # If we're on iteration 2+ but there are no numbered columns (manufacturer_2,
+        # mpn_2, etc.), we already processed the single manufacturer/mpn on i==1 — stop.
+        if i > 1 and mfr_key == 'manufacturer' and mpn_key == 'mpn':
+            break
         
         mfr_col = column_map[mfr_key]
         mpn_col = column_map[mpn_key]
@@ -674,6 +797,10 @@ def parse_bom_document(file_path: str, use_ocr_fallback: bool = True) -> List[Di
                         print(f"    [OK] BOM table detected! (confidence: {detection.confidence:.2f})")
                         print(f"    Column mapping: {detection.column_map}")
                     
+                    # Grab header cells for extra_fields capture
+                    _header_row = table[detection.header_row_idx] if detection.header_row_idx >= 0 else []
+                    _used_cols  = set(detection.column_map.values())
+
                     # Parse data rows (skip header if present)
                     data_rows = table[detection.header_row_idx + 1:] if detection.header_row_idx >= 0 else table
                     
@@ -682,6 +809,16 @@ def parse_bom_document(file_path: str, use_ocr_fallback: bool = True) -> List[Di
                         part = parse_bom_row(row, detection.column_map, page_num)
                         
                         if part:
+                            # Capture columns not consumed by the structured parser into extra_fields
+                            extra_fields: dict = {}
+                            for _ci, _hdr_cell in enumerate(_header_row):
+                                if _ci in _used_cols:
+                                    continue
+                                _hdr = str(_hdr_cell).strip() if _hdr_cell else ""
+                                _val = str(row[_ci]).strip() if _ci < len(row) and row[_ci] else ""
+                                if _hdr and _val:
+                                    extra_fields[_hdr] = _val
+
                             # Convert to dict format
                             part_dict = {
                                 'part_number': part.part_number,
@@ -692,6 +829,9 @@ def parse_bom_document(file_path: str, use_ocr_fallback: bool = True) -> List[Di
                                 'confidence': part.confidence,
                                 'page_number': part.page_number
                             }
+
+                            if extra_fields:
+                                part_dict['extra_fields'] = extra_fields
                             
                             if part.validation_flags:
                                 part_dict['validation_flags'] = part.validation_flags

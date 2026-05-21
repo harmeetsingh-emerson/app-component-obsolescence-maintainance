@@ -91,13 +91,13 @@ class QueryIntentAgent:
 # ============= AGENT 0b: Response Reviewer Agent =============
 class ResponseReviewerAgent:
     """
-    Uses gpt-oss (via Ollama) to review the full result set against the original
+    Uses llama3.2:3b (via Ollama) to review the full result set against the original
     user query and return only the meaningful / matching rows.
 
     Steps:
       1. Build a compact summary of all excel rows (BOM No, Part, Manufacturer,
          YEOL, EOL, RoHS, Description) — keeps the LLM prompt manageable.
-      2. Ask gpt-oss to identify which BOM row numbers satisfy the query.
+      2. Ask llama3.2:3b to identify which BOM row numbers satisfy the query.
       3. Filter excel_data, parts_found, and regenerate formatted_response.
     """
 
@@ -127,10 +127,88 @@ class ResponseReviewerAgent:
         '{"matching_bom_nos": [], "explanation": "No rows satisfy the query."}\n'
     )
 
+    # Rows per LLM call — keep well within llama3.2:3b's context window
+    CHUNK_SIZE = 25
+
+    def _lifecycle_label(self, eol_val: str) -> str:
+        v = str(eol_val).strip()
+        if v == "Yes":             return "Discontinued"
+        if v == "No":              return "Active"
+        if v == "Not Found in SE": return "Unknown"
+        return v or "Unknown"
+
+    def _call_llm_chunk(self, query: str, chunk: List[Dict]) -> set:
+        """
+        Send one chunk of rows to the LLM and return the set of matching BOM Nos.
+        Returns None on hard failure (caller should treat as 'all match').
+        """
+        header = "BOM_No|Part|Manufacturer|YEOL|Lifecycle|RoHS"
+        lines  = [header]
+        for row in chunk:
+            lines.append(
+                f"{row.get('BOM No','')}|"
+                f"{row.get('Requested Part','')}|"
+                f"{row.get('Manufacturer Name','')}|"
+                f"{row.get('YEOL','')}|"
+                f"{self._lifecycle_label(row.get('EOL',''))}|"
+                f"{row.get('RoHS','')}"
+            )
+        table_text = "\n".join(lines)
+
+        user_message = f"User query: {query}\n\nBOM data table:\n{table_text}"
+
+        payload = {
+            "model": OLLAMA_REVIEW_MODEL,
+            "messages": [
+                {"role": "system", "content": self.SYSTEM_PROMPT},
+                {"role": "user",   "content": user_message}
+            ],
+            "stream": False,
+            "options": {"temperature": 0, "num_predict": 512}
+        }
+
+        try:
+            resp = requests.post(OLLAMA_CHAT_URL, json=payload, timeout=120)
+        except requests.exceptions.ReadTimeout:
+            print("[ReviewAgent] Chunk timed out — skipping chunk, treating all rows as matching")
+            return None
+        except requests.exceptions.ConnectionError as exc:
+            print(f"[ReviewAgent] Connection error ({exc}) — skipping chunk")
+            return None
+
+        if resp.status_code != 200:
+            print(f"[ReviewAgent] Ollama HTTP {resp.status_code} on chunk — skipping chunk")
+            return None
+
+        resp_json  = resp.json()
+        msg_block  = resp_json.get("message", {})
+        content    = (msg_block.get("content") or "").strip()
+        done_reason = resp_json.get("done_reason", "")
+
+        if done_reason == "length":
+            print("[ReviewAgent] Chunk hit token limit — treating all rows in chunk as matching")
+            return {row.get("BOM No") for row in chunk}
+
+        json_match = re.search(r'\{.*?\}', content, re.DOTALL)
+        if not json_match:
+            print(f"[ReviewAgent] No JSON in chunk response ({len(content)} chars) — treating all rows as matching")
+            return {row.get("BOM No") for row in chunk}
+
+        try:
+            parsed = json.loads(json_match.group())
+        except json.JSONDecodeError:
+            print("[ReviewAgent] JSON parse error on chunk — treating all rows as matching")
+            return {row.get("BOM No") for row in chunk}
+
+        return set(parsed.get("matching_bom_nos", []))
+
     def review(self, query: str, excel_data: List[Dict],
                parts_found: List[Dict]) -> Dict:
         """
-        Review and filter the result set using gpt-oss.
+        Review and filter the result set using llama3.2:3b.
+        Large result sets are processed in chunks of CHUNK_SIZE rows so the
+        model never hits its context-window limit.  Results from all chunks
+        are merged before filtering.
 
         Returns a dict with filtered keys:
           {
@@ -148,85 +226,36 @@ class ResponseReviewerAgent:
             return fallback
 
         try:
-            # Build compact table — one line per row
-            # Map EOL Yes/No → descriptive Lifecycle label so gpt-oss isn't confused
-            def _lifecycle_label(eol_val: str) -> str:
-                v = str(eol_val).strip()
-                if v == "Yes":           return "Discontinued"
-                if v == "No":            return "Active"
-                if v == "Not Found in SE": return "Unknown"
-                return v or "Unknown"  # Ltb, Unknown, blank, etc.
+            # Split into chunks and call LLM for each
+            chunks = [
+                excel_data[i : i + self.CHUNK_SIZE]
+                for i in range(0, len(excel_data), self.CHUNK_SIZE)
+            ]
+            total_chunks = len(chunks)
+            print(f"[ReviewAgent] {len(excel_data)} rows → {total_chunks} chunk(s) of ≤{self.CHUNK_SIZE}")
 
-            lines = ["BOM_No | Requested_Part | Manufacturer | YEOL | Lifecycle | RoHS | Description"]
-            for row in excel_data:
-                lines.append(
-                    f"{row.get('BOM No','')} | "
-                    f"{row.get('Requested Part','')} | "
-                    f"{row.get('Manufacturer Name','')} | "
-                    f"{row.get('YEOL','')} | "
-                    f"{_lifecycle_label(row.get('EOL',''))} | "
-                    f"{row.get('RoHS','')} | "
-                    f"{str(row.get('Description',''))[:80]}"
-                )
-            table_text = "\n".join(lines)
+            matching_nos: set = set()
+            all_failed = True
 
-            user_message = (
-                f"User query: {query}\n\n"
-                f"BOM data table:\n{table_text}"
-            )
+            for idx, chunk in enumerate(chunks, 1):
+                print(f"[ReviewAgent] Chunk {idx}/{total_chunks}: {len(chunk)} rows")
+                result = self._call_llm_chunk(query, chunk)
+                if result is None:
+                    # Hard failure — treat whole chunk as matching (safe fallback)
+                    matching_nos.update(row.get("BOM No") for row in chunk)
+                else:
+                    all_failed = False
+                    matching_nos.update(result)
 
-            payload = {
-                "model": OLLAMA_REVIEW_MODEL,
-                "messages": [
-                    {"role": "system", "content": self.SYSTEM_PROMPT},
-                    {"role": "user",   "content": user_message}
-                ],
-                "stream": False,
-                # gpt-oss is a thinking model: it spends many tokens on chain-of-thought
-                # before producing the final answer.  Give it enough headroom.
-                "options": {"temperature": 0, "num_predict": 4096}
-            }
-
-            print(f"[ReviewAgent] Sending {len(excel_data)} rows to {OLLAMA_REVIEW_MODEL} for review…")
-            resp = requests.post(OLLAMA_CHAT_URL, json=payload, timeout=300)
-
-            if resp.status_code != 200:
-                print(f"[ReviewAgent] Ollama HTTP {resp.status_code} — returning unfiltered data")
+            if all_failed:
+                print("[ReviewAgent] All chunks failed — returning unfiltered data")
                 return fallback
 
-            msg_block = resp.json().get("message", {})
-            # gpt-oss (thinking model): final answer → content; chain-of-thought → thinking.
-            # If content is empty (model ran out of tokens mid-think), fall back to thinking.
-            content = (msg_block.get("content") or "").strip()
-            if not content:
-                content = (msg_block.get("thinking") or "").strip()
-                if content:
-                    print("[ReviewAgent] content empty — reading from thinking field")
-
-            done_reason = resp.json().get("done_reason", "")
-            if done_reason == "length":
-                print(f"[ReviewAgent] WARNING: model hit token limit (done_reason=length). "
-                      "Try increasing num_predict or simplifying the prompt.")
-
-            json_match = re.search(r'\{.*?\}', content, re.DOTALL)
-            if not json_match:
-                print(f"[ReviewAgent] No JSON found in response (len={len(content)}): {content[:400]}")
-                return fallback
-
-            parsed = json.loads(json_match.group())
-            matching_nos = set(parsed.get("matching_bom_nos", []))
-            explanation  = parsed.get("explanation", "")
-            print(f"[ReviewAgent] LLM matched BOM nos: {sorted(matching_nos)}")
-            print(f"[ReviewAgent] Explanation: {explanation}")
-
-            # Safety: if LLM returns 0 matches but explanation doesn't say "no rows",
-            # it likely hit a formatting bug — fall back to unfiltered data.
-            if not matching_nos and "no rows" not in explanation.lower() and "no match" not in explanation.lower():
-                print(f"[ReviewAgent] WARNING: 0 matches but explanation suggests rows exist — returning fallback")
-                return fallback
+            explanation = f"Reviewed {len(excel_data)} rows in {total_chunks} batch(es)."
+            print(f"[ReviewAgent] LLM matched BOM nos across all chunks: {sorted(matching_nos)}")
 
             if not matching_nos:
-                # LLM genuinely found nothing
+                # LLM found nothing across all chunks
                 return {"excel_data": [], "parts_found": [],
                         "explanation": explanation, "reviewed": True}
 
@@ -428,51 +457,84 @@ class SiliconExpertAgent:
             return None
         
         print(f"\n[SiliconExpert] Querying API with {len(all_pairs)} manufacturer-MPN pairs...")
-        
-        # Batch into chunks of 20 pairs to stay within URL/API length limits
-        BATCH_SIZE = 20
+
+        # Batch into chunks of 20 pairs to stay within URL/API length limits,
+        # then fire up to 8 batches concurrently to avoid 450 sequential calls.
+        BATCH_SIZE   = 20
+        MAX_WORKERS  = 8
+        REQUEST_TIMEOUT = 30  # seconds per request
+
         batches = [all_pairs[i:i + BATCH_SIZE] for i in range(0, len(all_pairs), BATCH_SIZE)]
-        print(f"[SiliconExpert] Splitting into {len(batches)} batch(es) of up to {BATCH_SIZE} pairs")
-        
-        combined_results = []
-        combined_metadata = []
-        last_response_data = None
-        
-        for batch_idx, batch in enumerate(batches):
+        print(f"[SiliconExpert] {len(batches)} batch(es) of ≤{BATCH_SIZE} pairs — "
+              f"{MAX_WORKERS} concurrent workers, {REQUEST_TIMEOUT}s timeout each")
+
+        import concurrent.futures as _cf_se
+        import threading as _threading
+
+        # Results list pre-sized so we can insert in order without a lock on the list itself
+        batch_results = [None] * len(batches)
+        _print_lock = _threading.Lock()
+
+        def _fetch_batch(idx_batch):
+            batch_idx, batch = idx_batch
             try:
                 api_input = [
                     {"partNumber": pair["partNumber"], "manufacturer": pair["manufacturer"]}
                     for pair in batch
                 ]
                 parts_json = json.dumps(api_input)
-                endpoint = f'https://api.siliconexpert.com/ProductAPI/search/listPartSearch?partNumber={parts_json}'
-                
-                response = self.session.get(endpoint, verify=False)
-                
+                endpoint = (
+                    f'https://api.siliconexpert.com/ProductAPI/search/listPartSearch'
+                    f'?partNumber={parts_json}'
+                )
+                response = self.session.get(endpoint, verify=False, timeout=REQUEST_TIMEOUT)
+
                 if response.status_code == 200:
                     data = response.json()
-                    last_response_data = data
                     status = data.get('Status', {})
                     if status.get('Success') == 'true' or status.get('Code') != '3':
-                        # SE API structure: data['Result']['PartData'] = list of PartData entries
                         result_block = data.get('Result', {})
                         if isinstance(result_block, dict):
                             part_data = result_block.get('PartData', [])
                             if isinstance(part_data, dict):
                                 part_data = [part_data]
-                            combined_results.extend(part_data)
-                            print(f"[SiliconExpert] Batch {batch_idx+1}/{len(batches)} ✓ ({len(part_data)} PartData entries)")
+                            with _print_lock:
+                                print(f"[SiliconExpert] Batch {batch_idx+1}/{len(batches)} ✓ "
+                                      f"({len(part_data)} PartData entries)")
+                            return data, batch, part_data
                         else:
-                            print(f"[SiliconExpert] Batch {batch_idx+1}/{len(batches)} ✓ (Result not a dict: {type(result_block)})")
-                        combined_metadata.extend(batch)
+                            with _print_lock:
+                                print(f"[SiliconExpert] Batch {batch_idx+1}/{len(batches)} ✓ "
+                                      f"(Result not a dict: {type(result_block)})")
+                            return data, batch, []
                     else:
-                        print(f"[SiliconExpert] Batch {batch_idx+1}/{len(batches)} ✗ no results: {status.get('Message')}")
+                        with _print_lock:
+                            print(f"[SiliconExpert] Batch {batch_idx+1}/{len(batches)} ✗ "
+                                  f"no results: {status.get('Message')}")
                 else:
-                    print(f"[SiliconExpert] Batch {batch_idx+1}/{len(batches)} ✗ HTTP {response.status_code}")
+                    with _print_lock:
+                        print(f"[SiliconExpert] Batch {batch_idx+1}/{len(batches)} ✗ "
+                              f"HTTP {response.status_code}")
             except Exception as e:
-                print(f"[SiliconExpert] Batch {batch_idx+1}/{len(batches)} ✗ Error: {e}")
-                import traceback
-                traceback.print_exc()
+                with _print_lock:
+                    print(f"[SiliconExpert] Batch {batch_idx+1}/{len(batches)} ✗ Error: {e}")
+            return None, batch, []
+
+        combined_results   = []
+        combined_metadata  = []
+        last_response_data = None
+
+        with _cf_se.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = {
+                executor.submit(_fetch_batch, (idx, batch)): idx
+                for idx, batch in enumerate(batches)
+            }
+            for future in _cf_se.as_completed(futures):
+                resp_data, meta_batch, part_data = future.result()
+                if resp_data is not None:
+                    last_response_data = resp_data
+                    combined_results.extend(part_data)
+                    combined_metadata.extend(meta_batch)
         
         if not combined_metadata:
             print("[SiliconExpert] ✗ All batches failed or returned no results")
@@ -536,12 +598,8 @@ class ResponseFormatterAgent:
                 preference = mfr_data.get('preference', 1)
                 mfr = mfr_data.get('manufacturer')
                 mpn = mfr_data.get('mpn')
-                
-                if preference == 1:
-                    output.append(f"      ✓ [PRIMARY] {mfr}")
-                else:
-                    output.append(f"      • [ALT-{preference}] {mfr}")
-                
+
+                output.append(f"      ✓ [{preference}] {mfr}")
                 output.append(f"        MPN: {mpn}")
             
             output.append("")
@@ -622,26 +680,43 @@ class ResponseFormatterAgent:
                     has_valid_api_data = True
         
         if not has_valid_api_data:
-            # No API data - create basic rows from FAISS data
+            # No API data - create rows from FAISS data, enriched with any
+            # extra_fields that were captured from the source file columns.
             for part in parts_found:
                 manufacturers = part.get('manufacturers', [])
-                
+                # extra_fields: dict of original_column_header → value (from file_converters)
+                extra = part.get('extra_fields', {})
+
+                def _ef(key: str, *aliases, default: str = "") -> str:
+                    """Case-insensitive lookup across extra_fields and aliases."""
+                    for k in (key, *aliases):
+                        # Exact match first, then case-insensitive scan
+                        v = extra.get(k)
+                        if not v:
+                            kl = k.lower()
+                            v = next((ev for ek, ev in extra.items() if ek.lower() == kl), None)
+                        if v:
+                            return str(v)
+                    return default
+
                 for mfr_data in manufacturers:
                     excel_rows.append({
                         "BOM No": bom_index,
+                        "Parent Part Number": part.get('part_number', ''),
+                        "LibRef": _ef("LibRef", "lib ref", "library ref", "library reference", "libref"),
                         "Requested Part": part.get('part_number', ''),
-                        "ComID": "",
+                        "ComID": _ef("ComID", "com id", "component id"),
                         "Manufacturer Part Number": mfr_data.get('mpn', ''),
                         "Manufacturer Name": mfr_data.get('manufacturer', ''),
-                        "PlName": "",
+                        "PlName": _ef("PlName", "platform name", "platform"),
                         "Description": part.get('description', '').replace('\n', ' ').strip(),
-                        "Datasheet": "",
-                        "EOL": "Unknown",
-                        "RoHS": "Unknown",
-                        "RoHS Version": "",
-                        "TaxonomyPath": "",
-                        "TaxonomyPathID": "",
-                        "YEOL": "",
+                        "Datasheet": _ef("Datasheet", "data sheet", "datasheet url", "ds url"),
+                        "EOL": _ef("EOL", "lifecycle", "eol status", default="Unknown"),
+                        "RoHS": _ef("RoHS", "rohs compliant", "rohs status", default="Unknown"),
+                        "RoHS Version": _ef("RoHS Version", "rohs version", "rohs ver"),
+                        "TaxonomyPath": _ef("TaxonomyPath", "taxonomy path", "category path"),
+                        "TaxonomyPathID": _ef("TaxonomyPathID", "taxonomy path id", "taxonomypathid"),
+                        "YEOL": _ef("YEOL", "years to eol", "years remaining", "years left"),
                         "Preference": mfr_data.get('preference', 1)
                     })
                     bom_index += 1
@@ -674,6 +749,15 @@ class ResponseFormatterAgent:
 
             dto = (api_part_entry.get('PartList') or {}).get('PartDto')
 
+            # Look up the original BOM part (for parent PN and LibRef regardless of SE match)
+            _bom_src, _ = bom_lookup.get((requested_part, requested_mfr), ({}, {}))
+            _src_extra   = _bom_src.get('extra_fields') or {}
+            _parent_pn   = _bom_src.get('part_number', '') or requested_part
+            _libref      = next(
+                (v for k, v in _src_extra.items() if k.lower() in ('libref', 'lib ref', 'library ref', 'library reference')),
+                ''
+            )
+
             if dto:
                 # SE matched this MPN — use full SE data
                 com_id        = str(dto.get('ComID', '')).strip()
@@ -704,17 +788,18 @@ class ResponseFormatterAgent:
                     rohs_status = rohs_raw.title() if rohs_raw else "Unknown"
             else:
                 # SE had no match for this MPN — keep BOM description, leave SE fields blank
-                bom_part, bom_mfr = bom_lookup.get((requested_part, requested_mfr), ({}, {}))
                 com_id = part_number = pl_name = datasheet = ""
                 rohs_version = taxonomy_path = taxonomy_path_id = yeol = ""
                 manufacturer  = requested_mfr
-                description   = str(bom_part.get('description', '')).replace('\n', ' ').strip()
+                description   = str(_bom_src.get('description', '')).replace('\n', ' ').strip()
                 eol_status    = "Not Found in SE"
                 rohs_status   = "Unknown"
                 print(f"[Formatter] SE had no match for {requested_part} / {requested_mfr} — using BOM data")
             
             excel_rows.append({
                 "BOM No": bom_index,
+                "Parent Part Number": _parent_pn,
+                "LibRef": _libref,
                 "Requested Part": requested_part,
                 "ComID": com_id,
                 "Manufacturer Part Number": part_number,

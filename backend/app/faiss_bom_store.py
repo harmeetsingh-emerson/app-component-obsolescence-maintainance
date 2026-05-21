@@ -75,6 +75,15 @@ class FAISSBOMStore:
     def _create_searchable_text(self, part_data: Dict) -> str:
         """Create searchable text from part data for embedding"""
         
+        # Raw-row / intelligent-row records carry all content in raw_row_text / description
+        if part_data.get('source_type') in ('raw_row', 'intelligent_row'):
+            raw = part_data.get('raw_row_text') or part_data.get('description', '')
+            sheet = part_data.get('sheet', '')
+            pn = part_data.get('part_number', '')
+            topic = part_data.get('file_topic', '')
+            prefix = f"Topic: {topic} | " if topic else ""
+            return f"{prefix}Sheet: {sheet} | Part: {pn} | {raw}"
+
         text_parts = [
             f"Part Number: {part_data.get('part_number')}",
         ]
@@ -96,37 +105,59 @@ class FAISSBOMStore:
         
         return " | ".join(text_parts)
     
+    def _get_embeddings_batch(self, texts: List[str]) -> List[Optional[np.ndarray]]:
+        """
+        Generate embeddings for a list of texts concurrently using a thread pool.
+        Falls back to None for any text that fails.
+        """
+        import concurrent.futures as _cf
+
+        EMBED_WORKERS = 8  # concurrent Ollama connections
+
+        def _embed_one(text):
+            return self._get_embedding(text)
+
+        results = [None] * len(texts)
+        with _cf.ThreadPoolExecutor(max_workers=EMBED_WORKERS) as executor:
+            future_to_idx = {executor.submit(_embed_one, t): i for i, t in enumerate(texts)}
+            for future in _cf.as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    results[idx] = future.result()
+                except Exception:
+                    results[idx] = None
+        return results
+
     def add_parts(self, parts: List[Dict], source_file: str = None):
         """Add parts to FAISS index with embeddings"""
         
         print(f"[FAISS Store] Adding {len(parts)} parts to index...")
         
-        added_count = 0
-        embeddings_to_add = []
-        metadata_to_add = []
-        
+        # Prepare all part dicts and searchable texts up front
+        part_dicts: List[Dict] = []
+        texts: List[str] = []
         for part in parts:
-            # Add source file info
             part_data = part.copy()
             if source_file:
                 part_data['source_file'] = source_file
-            
-            # Create searchable text
-            searchable_text = self._create_searchable_text(part_data)
-            
-            # Generate embedding
-            embedding = self._get_embedding(searchable_text)
-            
+            part_dicts.append(part_data)
+            texts.append(self._create_searchable_text(part_data))
+
+        # Generate all embeddings concurrently
+        print(f"[FAISS Store] Generating {len(texts)} embeddings (parallel)…")
+        embeddings = self._get_embeddings_batch(texts)
+
+        embeddings_to_add = []
+        metadata_to_add   = []
+        added_count = 0
+
+        for part_data, embedding in zip(part_dicts, embeddings):
             if embedding is not None:
                 embeddings_to_add.append(embedding)
                 metadata_to_add.append(part_data)
                 added_count += 1
-                
-                part_num = part_data.get('part_number')
-                num_mfrs = len(part_data.get('manufacturers', []))
-                print(f"[FAISS Store] [OK] Embedded: {part_num} ({num_mfrs} manufacturer(s))")
             else:
-                print(f"[FAISS Store] ✗ Failed to embed: {part.get('part_number')}")
+                print(f"[FAISS Store] ✗ Failed to embed: {part_data.get('part_number')}")
         
         # Add to FAISS index
         if embeddings_to_add:
