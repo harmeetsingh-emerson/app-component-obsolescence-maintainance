@@ -14,7 +14,7 @@ function App() {
   // API base URL — set via REACT_APP_API_URL at build time.
   // Production (single container): empty string → relative paths served by FastAPI.
   // Development (separate containers): http://localhost:8000
-  const API_BASE = process.env.REACT_APP_API_URL || "";
+  const API_BASE = process.env.REACT_APP_API_URL || "http://localhost:8000";
 
   const [file, setFile] = useState(null);
   const [uploadStatus, setUploadStatus] = useState("");
