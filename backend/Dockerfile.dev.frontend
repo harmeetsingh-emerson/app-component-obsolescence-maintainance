@@ -1,0 +1,27 @@
+# =============================================================================
+# Development Dockerfile — React frontend dev server
+#
+# - Runs the CRA dev server (npm start) with Hot Module Replacement (HMR).
+# - The src/ and public/ directories are bind-mounted at runtime so any
+#   file save in your editor is reflected in the browser instantly.
+# - CHOKIDAR_USEPOLLING / WATCHPACK_POLLING ensure file-watch works
+#   correctly on Windows and inside Docker volumes.
+# =============================================================================
+
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Install dependencies into the image (node_modules live in the image,
+# not in the bind-mounted src volume, so they don't get overwritten).
+COPY frontend/ai-assistant-fe/package*.json ./
+RUN npm ci --silent
+
+# src/ and public/ are mounted at runtime — no COPY needed here.
+
+ENV CHOKIDAR_USEPOLLING=true
+ENV WATCHPACK_POLLING=true
+
+EXPOSE 3000
+
+CMD ["npm", "start"]

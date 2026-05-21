@@ -1,0 +1,107 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# Root .gitignore — covers backend (Python/FastAPI) + frontend (React/Node)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Secrets / environment variables ──────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+**/.env
+**/.env.local
+**/.env.*.local
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BACKEND (Python / FastAPI)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Python virtual environment
+backend/.venv/
+
+# Python bytecode & cache
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+
+# Python packaging / build artifacts
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+
+# ── Runtime data (generated at runtime, should not be committed) ──────────────
+
+# User-uploaded BOM documents
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# OCR extracted text and processing status
+backend/ocr_outputs/*
+!backend/ocr_outputs/.gitkeep
+
+# FAISS vector index and metadata (rebuilt on reindex)
+backend/index-faiss-store/parts.index
+backend/index-faiss-store/metadata.pkl
+backend/index-faiss-store/parts_readable.json
+
+# Processed documents
+backend/documents/*
+!backend/documents/.gitkeep
+
+# ── Test & script outputs ─────────────────────────────────────────────────────
+backend/tests/test_results.txt
+backend/scripts/ocr_output.txt
+backend/scripts/ocr_timing_result.txt
+backend/scripts/tesseract_output.txt
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FRONTEND (React / Node.js)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# npm / yarn dependencies
+frontend/node_modules/
+frontend/.pnp
+frontend/.pnp.js
+
+# Production build
+frontend/build/
+
+# Test coverage reports
+frontend/coverage/
+
+# Debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.log
+
+# ══════════════════════════════════════════════════════════════════════════════
+# OS & IDE
+# ══════════════════════════════════════════════════════════════════════════════
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# VS Code (keep .vscode/extensions.json and .vscode/settings.json if shared)
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/launch.json
+
+# JetBrains IDEs
+.idea/
+*.iml
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DOCKER (local override files only)
+# ══════════════════════════════════════════════════════════════════════════════
+docker-compose.override.yml

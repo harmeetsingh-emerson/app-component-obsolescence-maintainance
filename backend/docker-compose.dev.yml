@@ -1,0 +1,70 @@
+# Development Docker Compose — two containers, live-reload on both
+#
+# Usage:
+#   Start:   docker-compose -f docker-compose.dev.yml up
+#   Rebuild: docker-compose -f docker-compose.dev.yml up --build
+#   Stop:    docker-compose -f docker-compose.dev.yml down
+#
+# Access:
+#   Frontend (React dev server)  →  http://localhost:3000
+#   Backend  (FastAPI)           →  http://localhost:8000
+#   API docs (Swagger UI)        →  http://localhost:8000/docs
+#
+# How live-reload works:
+#   backend  — uvicorn runs with --reload; ./app is bind-mounted so any
+#               .py file save restarts the server automatically.
+#   frontend — CRA dev server (HMR); ./frontend/ai-assistant-fe/src and
+#               ./frontend/ai-assistant-fe/public are bind-mounted so any
+#               .js/.css save hot-reloads the browser tab.
+#
+# Ollama must be running on the host at port 11434.
+
+services:
+
+  # ── Python / FastAPI backend ───────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    image: ai-customer-support:dev-backend
+    container_name: ai-cs-backend-dev
+    ports:
+      - "8000:8000"
+    volumes:
+      # Bind-mount source directories for hot-reload
+      - ./app:/app/app
+      - ./configs:/app/configs
+      # Bind-mount data directories so uploads/OCR/index persist on host
+      - ./uploads:/app/uploads
+      - ./ocr_outputs:/app/ocr_outputs
+      - ./index-faiss-store:/app/index-faiss-store
+    environment:
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - KMP_DUPLICATE_LIB_OK=TRUE
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  # ── React frontend dev server ──────────────────────────────────────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev.frontend
+    image: ai-customer-support:dev-frontend
+    container_name: ai-cs-frontend-dev
+    ports:
+      - "3000:3000"
+    volumes:
+      # Bind-mount only src/ and public/ — node_modules stays in the image
+      - ./frontend/ai-assistant-fe/src:/app/src
+      - ./frontend/ai-assistant-fe/public:/app/public
+    environment:
+      # Browser (not the container) makes API calls, so localhost:8000
+      # resolves to the host's exposed backend port.
+      - REACT_APP_API_URL=http://localhost:8000
+      - CHOKIDAR_USEPOLLING=true
+      - WATCHPACK_POLLING=true
+      - WDS_SOCKET_PORT=0   # fixes HMR websocket behind Docker port mapping
+    depends_on:
+      - backend
+    restart: unless-stopped

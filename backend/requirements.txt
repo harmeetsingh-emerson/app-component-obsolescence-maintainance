@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+faiss-cpu
+PyPDF2
+paddleocr
+numpy
+python-docx
+pdfplumber
+pdf2image
+tabula-py
+sentence-transformers
+torch
+transformers
+PyMuPDF
+requests

@@ -1,0 +1,58 @@
+# ── Python runtime ────────────────────────────────────────────────────────────
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Environment / secrets ─────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── Runtime data (generated at runtime, not source code) ─────────────────────
+# User-uploaded BOM documents
+uploads/*
+!uploads/.gitkeep
+
+# OCR extracted text and processing status
+ocr_outputs/*
+!ocr_outputs/.gitkeep
+
+# FAISS vector index and metadata (rebuilt on reindex)
+index-faiss-store/parts.index
+index-faiss-store/metadata.pkl
+index-faiss-store/parts_readable.json
+
+# Any processed documents
+documents/*
+!documents/.gitkeep
+
+# ── Frontend build artifacts ──────────────────────────────────────────────────
+frontend/ai-assistant-fe/node_modules/
+frontend/ai-assistant-fe/build/
+frontend/ai-assistant-fe/.env.local
+frontend/ai-assistant-fe/.env.development.local
+frontend/ai-assistant-fe/.env.test.local
+frontend/ai-assistant-fe/.env.production.local
+frontend/ai-assistant-fe/npm-debug.log*
+frontend/ai-assistant-fe/yarn-debug.log*
+frontend/ai-assistant-fe/yarn-error.log*
+
+# ── Test outputs ──────────────────────────────────────────────────────────────
+tests/test_results.txt
+scripts/ocr_output.txt
+scripts/ocr_timing_result.txt
+scripts/tesseract_output.txt
+
+# ── OS / IDE ──────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

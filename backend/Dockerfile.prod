@@ -1,0 +1,73 @@
+# =============================================================================
+# Production Dockerfile — Multi-stage build
+#
+# Stage 1 (frontend-builder): Builds the React app with Node.js.
+#   Every `docker build` / `docker-compose build` automatically runs
+#   `npm run build`, so the production image always contains the latest
+#   frontend without any manual step on the host.
+#
+# Stage 2 (runtime): Python + copies the React build from Stage 1.
+#   The FastAPI server serves both the API and the static React files.
+# =============================================================================
+
+# ─── Stage 1: Build React frontend ───────────────────────────────────────────
+FROM node:20-alpine AS frontend-builder
+
+WORKDIR /app
+
+# Install dependencies first (better layer caching)
+COPY frontend/ai-assistant-fe/package*.json ./
+RUN npm ci --silent
+
+# Copy source and build
+COPY frontend/ai-assistant-fe/ ./
+
+# Empty string → all fetch() calls use relative paths (/upload, /query …)
+# which are served by the same FastAPI origin — no cross-origin issues.
+ENV REACT_APP_API_URL=""
+
+RUN npm run build
+
+# ─── Stage 2: Python runtime ──────────────────────────────────────────────────
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# System dependencies
+#   libgl1, libglib2.0-0, libsm6, libxrender1, libxext6 — OpenCV / PaddleOCR
+#   libgomp1  — OpenMP (used by numpy / faiss-cpu)
+#   poppler-utils — pdf2image
+#   default-jre-headless — tabula-py (requires Java)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgl1 \
+        libglib2.0-0 \
+        libsm6 \
+        libxrender1 \
+        libxext6 \
+        libgomp1 \
+        poppler-utils \
+        default-jre-headless \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Application code
+COPY app/ ./app/
+COPY configs/ ./configs/
+
+# React production build from Stage 1
+COPY --from=frontend-builder /app/build ./frontend/build
+
+# Runtime data directories (bind-mounted or named volumes in compose)
+RUN mkdir -p uploads ocr_outputs index-faiss-store documents
+
+ENV PYTHONUNBUFFERED=1
+ENV KMP_DUPLICATE_LIB_OK=TRUE
+# Ollama host — override at runtime if Ollama runs elsewhere
+ENV OLLAMA_BASE_URL=http://host.docker.internal:11434
+
+EXPOSE 8000
+
+CMD ["uvicorn", "app.main_faiss:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]

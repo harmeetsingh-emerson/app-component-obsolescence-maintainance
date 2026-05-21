@@ -1,0 +1,48 @@
+# Production Docker Compose
+#
+# Usage:
+#   Build & start:   docker-compose -f docker-compose.prod.yml up -d --build
+#   Rebuild only:    docker-compose -f docker-compose.prod.yml build
+#   Stop:            docker-compose -f docker-compose.prod.yml down
+#
+# The React frontend is baked into the image at build time (multi-stage
+# Dockerfile.prod). To deploy an updated frontend, simply rebuild:
+#   docker-compose -f docker-compose.prod.yml up -d --build
+#
+# Ollama must be running on the host at port 11434.
+# On Linux hosts, extra_hosts maps host.docker.internal automatically.
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+    image: ai-customer-support:prod
+    container_name: ai-customer-support-prod
+    ports:
+      - "8000:8000"
+    volumes:
+      # Named volumes keep uploaded documents, OCR extractions, and the
+      # FAISS index across container restarts and rebuilds.
+      - uploads_data:/app/uploads
+      - ocr_data:/app/ocr_outputs
+      - faiss_data:/app/index-faiss-store
+    environment:
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - KMP_DUPLICATE_LIB_OK=TRUE
+    # Resolves host.docker.internal on Linux (Docker Desktop handles this
+    # automatically on Windows/macOS).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  uploads_data:
+  ocr_data:
+  faiss_data:

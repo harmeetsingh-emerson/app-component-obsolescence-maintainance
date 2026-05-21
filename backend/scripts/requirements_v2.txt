@@ -1,0 +1,30 @@
+# Core dependencies
+fastapi
+uvicorn[standard]
+python-multipart
+
+# Document parsing
+pdfplumber
+pdf2image
+pytesseract
+python-docx
+pandas
+openpyxl  # For Excel support
+camelot-py[cv]  # Include cv extras for lattice mode
+
+# Image processing
+Pillow
+opencv-python
+numpy
+
+# Vector store / embeddings
+faiss-cpu
+requests  # For Ollama API
+
+# Optional but recommended
+# sentence-transformers  # If you want local embeddings instead of Ollama
+
+# System dependencies (install separately):
+# - Tesseract OCR: https://github.com/UB-Mannheim/tesseract/wiki
+# - Poppler: https://github.com/oschwartz10612/poppler-windows/releases/
+# - Ghostscript: https://ghostscript.com/releases/gsdnld.html (for Camelot)

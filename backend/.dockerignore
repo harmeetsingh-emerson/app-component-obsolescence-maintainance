@@ -1,0 +1,38 @@
+# Python
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Node
+frontend/ai-assistant-fe/node_modules/
+frontend/ai-assistant-fe/build/
+
+# Git
+.git/
+.gitignore
+
+# Data directories (populated at runtime via volumes)
+uploads/*
+ocr_outputs/*
+index-faiss-store/*
+documents/*
+
+# Dev / test artifacts
+tests/
+scripts/
+docs/
+*.md
+run_full_test.py
+test_ocr_fix.py
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
