@@ -35,15 +35,16 @@ documents/*
 !documents/.gitkeep
 
 # ── Frontend build artifacts ──────────────────────────────────────────────────
-frontend/ai-assistant-fe/node_modules/
-frontend/ai-assistant-fe/build/
-frontend/ai-assistant-fe/.env.local
-frontend/ai-assistant-fe/.env.development.local
-frontend/ai-assistant-fe/.env.test.local
-frontend/ai-assistant-fe/.env.production.local
-frontend/ai-assistant-fe/npm-debug.log*
-frontend/ai-assistant-fe/yarn-debug.log*
-frontend/ai-assistant-fe/yarn-error.log*
+# (frontend lives at ../frontend/ relative to this backend/ directory)
+../frontend/node_modules/
+../frontend/build/
+../frontend/.env.local
+../frontend/.env.development.local
+../frontend/.env.test.local
+../frontend/.env.production.local
+../frontend/npm-debug.log*
+../frontend/yarn-debug.log*
+../frontend/yarn-error.log*
 
 # ── Test outputs ──────────────────────────────────────────────────────────────
 tests/test_results.txt

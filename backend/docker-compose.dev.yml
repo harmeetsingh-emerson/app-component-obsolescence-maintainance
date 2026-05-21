@@ -48,16 +48,16 @@ services:
   # ── React frontend dev server ──────────────────────────────────────────────
   frontend:
     build:
-      context: .
-      dockerfile: Dockerfile.dev.frontend
+      context: ../frontend
+      dockerfile: ../backend/Dockerfile.dev.frontend
     image: ai-customer-support:dev-frontend
     container_name: ai-cs-frontend-dev
     ports:
       - "3000:3000"
     volumes:
       # Bind-mount only src/ and public/ — node_modules stays in the image
-      - ./frontend/ai-assistant-fe/src:/app/src
-      - ./frontend/ai-assistant-fe/public:/app/public
+      - ../frontend/src:/app/src
+      - ../frontend/public:/app/public
     environment:
       # Browser (not the container) makes API calls, so localhost:8000
       # resolves to the host's exposed backend port.

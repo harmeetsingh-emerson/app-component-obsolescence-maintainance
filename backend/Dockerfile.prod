@@ -16,11 +16,11 @@ FROM node:20-alpine AS frontend-builder
 WORKDIR /app
 
 # Install dependencies first (better layer caching)
-COPY frontend/ai-assistant-fe/package*.json ./
+COPY frontend/package*.json ./
 RUN npm ci --silent
 
 # Copy source and build
-COPY frontend/ai-assistant-fe/ ./
+COPY frontend/ ./
 
 # Empty string → all fetch() calls use relative paths (/upload, /query …)
 # which are served by the same FastAPI origin — no cross-origin issues.
@@ -50,12 +50,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Python dependencies
-COPY requirements.txt .
+COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Application code
-COPY app/ ./app/
-COPY configs/ ./configs/
+COPY backend/app/ ./app/
+COPY backend/configs/ ./configs/
 
 # React production build from Stage 1
 COPY --from=frontend-builder /app/build ./frontend/build

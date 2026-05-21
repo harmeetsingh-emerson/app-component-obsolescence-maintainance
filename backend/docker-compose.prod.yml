@@ -15,8 +15,8 @@
 services:
   backend:
     build:
-      context: .
-      dockerfile: Dockerfile.prod
+      context: ..
+      dockerfile: backend/Dockerfile.prod
     image: ai-customer-support:prod
     container_name: ai-customer-support-prod
     ports:
