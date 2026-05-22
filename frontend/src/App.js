@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from "react";
 import * as XLSX from 'xlsx';
 import {
   Button, Typography, LinearProgress, Paper, TextField,
-  Alert, Chip, CircularProgress, Divider, Container, Stack,
+  Alert, Snackbar, Chip, CircularProgress, Divider, Container, Stack,
   Select, MenuItem, FormControl, InputLabel, Tooltip, IconButton, Box
 } from "@mui/material";
 import {
@@ -30,6 +30,7 @@ function App() {
   const [reindexing, setReindexing] = useState(false);
   const [reindexStatus, setReindexStatus] = useState("");
   const [ocrDpi, setOcrDpi] = useState(200);
+  const [uploadBanner, setUploadBanner] = useState(null); // { severity, message } | null
   const [files, setFiles] = useState([]);
   const [selectedFile, setSelectedFile] = useState("");
   const answerRef = useRef(null);
@@ -82,11 +83,14 @@ function App() {
           const info = completed[filename];
           stopOcrPoll();
           setUploadProgress(100);
+          setUploadStatus("");
           if (info.error) {
-            setUploadStatus(`⚠️ OCR finished with error: ${info.error}`);
+            setUploadBanner({ severity: "error", message: `OCR finished with error: ${info.error}` });
           } else {
-            setUploadStatus(`✅ OCR complete — document is ready to query`);
-          }          fetchFiles(); // refresh dropdown after OCR finishes          setTimeout(() => setUploadProgress(0), 1200);
+            setUploadBanner({ severity: "success", message: "OCR complete — document is ready to query" });
+          }
+          fetchFiles(); // refresh dropdown after OCR finishes
+          setTimeout(() => setUploadProgress(0), 1200);
         }
         // If neither key exists yet, the task just hasn't started — keep waiting
       } catch (_) {
@@ -240,7 +244,8 @@ function App() {
 
     // Stop any previous poll
     stopOcrPoll();
-    setUploadStatus("Uploading...");
+    setUploadBanner(null);
+    setUploadStatus("Uploading…");
     setUploadProgress(20);
 
     const formData = new FormData();
@@ -262,14 +267,15 @@ function App() {
         startOcrPoll(filename);
       } else {
         // Text-based PDF or BOM .txt — indexed immediately
-        setAnswer(result.message || JSON.stringify(result));
         setUploadProgress(100);
         setTimeout(() => setUploadProgress(0), 600);
-        setUploadStatus(`✅ ${result.message || 'Upload successful'}`);
+        setUploadBanner({ severity: "success", message: result.message || "Upload successful" });
+        setUploadStatus("");
         fetchFiles(); // refresh dropdown
       }
     } catch (err) {
-      setUploadStatus("Upload failed.");
+      setUploadBanner({ severity: "error", message: "Upload failed. Please try again." });
+      setUploadStatus("");
       setUploadProgress(0);
     }
   };
@@ -406,56 +412,58 @@ const handleQuery = async (e) => {
   };
 
   return (
-    <Container maxWidth="sm" sx={{ py: 5 }}>
-      <Paper elevation={3} sx={{ p: 4, borderRadius: 3 }}>
+    <Box sx={{ minHeight: "100vh", background: "linear-gradient(160deg, #e8edf5 0%, #f2f4f8 45%, #eceef2 100%)" }}>
+    <Container maxWidth={false} sx={{ py: 5, px: { xs: 2, sm: 4, md: 6 }, display: "flex", justifyContent: "center" }}>
+      <Box sx={{ width: "100%", maxWidth: "60%" }}>
+      <Paper
+        elevation={0}
+        sx={{
+          borderRadius: 4, overflow: "hidden",
+          border: "1px solid rgba(25,118,210,0.1)",
+          boxShadow: "0 8px 40px rgba(25,118,210,0.13), 0 2px 10px rgba(0,0,0,0.06)",
+          transition: "box-shadow 0.3s ease",
+          "&:hover": { boxShadow: "0 12px 50px rgba(25,118,210,0.18), 0 4px 16px rgba(0,0,0,0.08)" },
+        }}
+      >
+        {/* ── Gradient header bar ─────────────────────────────── */}
+        <Box sx={{ background: "linear-gradient(135deg, #002868 0%, #0063BE 100%)", px: 4, py: 3, borderBottom: "3px solid #00509E" }}>
+          <Typography variant="h5" fontWeight={800} sx={{ color: "#fff", letterSpacing: 0.3 }}>
+            BOM Obsolescence Analyzer
+          </Typography>
+          <Typography variant="body2" sx={{ color: "rgba(255,255,255,0.78)", mt: 0.5 }}>
+            Upload, query, and export component lifecycle data
+          </Typography>
+        </Box>
+        <Box sx={{ p: 4 }}>
 
         {/* ── Upload Section ─────────────────────────────────────── */}
-        <Typography variant="h5" fontWeight={700} gutterBottom>
+        <Typography variant="h6" fontWeight={700} gutterBottom sx={{
+          display: "flex", alignItems: "center", gap: 1.5,
+          "&::before": { content: '""', display: "block", width: 4, height: 20, borderRadius: 2, bgcolor: "primary.main", flexShrink: 0 },
+        }}>
           Upload Document
         </Typography>
 
-        {/* ── OCR Quality (DPI) Selector ──────────────────────────── */}
-        <Tooltip
-          title="Higher DPI = better accuracy for dense tables but slower processing"
-          placement="right"
-        >
-          <FormControl size="small" sx={{ mb: 2, minWidth: 260 }}>
-            <InputLabel id="dpi-label">OCR Quality (DPI)</InputLabel>
-            <Select
-              labelId="dpi-label"
-              value={ocrDpi}
-              label="OCR Quality (DPI)"
-              onChange={e => setOcrDpi(e.target.value)}
-              disabled={ocrPolling}
-            >
-              <MenuItem value={96}>96 DPI — Fast, lower accuracy</MenuItem>
-              <MenuItem value={150}>150 DPI — Balanced</MenuItem>
-              <MenuItem value={200}>200 DPI — Recommended (default)</MenuItem>
-              <MenuItem value={300}>300 DPI — High accuracy, slower</MenuItem>
-              <MenuItem value={400}>400 DPI — Maximum accuracy, slowest</MenuItem>
-            </Select>
-          </FormControl>
-        </Tooltip>
-
-        <Stack direction="row" spacing={2} alignItems="center">
+        {/* ── Step 1: Choose file ─────────────────────────────────── */}
+        <Stack direction="row" spacing={1.5} alignItems="center" sx={{ mb: 2 }}>
           <Button
             variant="outlined"
             component="label"
             startIcon={<CloudUpload />}
-            sx={{ textTransform: "none", minWidth: 160 }}
+            sx={{
+              textTransform: "none", minWidth: 160, fontWeight: 600,
+              borderWidth: 1.5,
+              transition: "all 0.25s ease",
+              "&:hover": { borderWidth: 1.5, transform: "translateY(-1px)", boxShadow: "0 4px 12px rgba(25,118,210,0.15)" },
+              "&:active": { transform: "translateY(0)" },
+            }}
           >
             {file ? file.name : "Choose file…"}
-            <input type="file" hidden onChange={e => setFile(e.target.files[0])} />
-          </Button>
-
-          <Button
-            variant="contained"
-            onClick={handleUpload}
-            disabled={!file || ocrPolling}
-            startIcon={ocrPolling ? <CircularProgress size={16} color="inherit" /> : <CloudUpload />}
-            sx={{ textTransform: "none" }}
-          >
-            {ocrPolling ? "Processing…" : "Upload"}
+            <input
+              type="file"
+              hidden
+              onChange={e => { setFile(e.target.files[0]); setUploadBanner(null); }}
+            />
           </Button>
 
           <Tooltip
@@ -502,6 +510,51 @@ const handleQuery = async (e) => {
           </Tooltip>
         </Stack>
 
+        {/* ── Step 2: OCR Quality selector + Upload button (visible once a file is chosen) ── */}
+        {file && (
+          <Stack direction="column" alignItems="flex-start" spacing={2} sx={{ mb: 1 }}>
+            <Tooltip
+              title="Higher DPI = better accuracy for dense tables but slower processing. 300 DPI is the effective maximum supported by the OCR engine."
+              placement="right"
+            >
+              <FormControl size="small" sx={{ minWidth: 260, maxWidth: 400 }}>
+                <InputLabel id="dpi-label">OCR Quality (DPI)</InputLabel>
+                <Select
+                  labelId="dpi-label"
+                  value={ocrDpi}
+                  label="OCR Quality (DPI)"
+                  onChange={e => setOcrDpi(e.target.value)}
+                  disabled={ocrPolling}
+                >
+                  <MenuItem value={96}>96 DPI — Fast, lower accuracy</MenuItem>
+                  <MenuItem value={150}>150 DPI — Balanced</MenuItem>
+                  <MenuItem value={200}>200 DPI — Recommended (default)</MenuItem>
+                  <MenuItem value={300}>300 DPI — Maximum accuracy, slower</MenuItem>
+                </Select>
+              </FormControl>
+            </Tooltip>
+            {/* ── Step 3: Upload button ──────────────────────────── */}
+            <Button
+              variant="contained"
+              onClick={handleUpload}
+              disabled={!file || ocrPolling}
+              startIcon={ocrPolling ? <CircularProgress size={16} sx={{ color: "#fff" }} /> : <CloudUpload />}
+              sx={{
+                textTransform: "none", fontWeight: 600,
+                color: "#fff", width: "fit-content", minWidth: 130,
+                background: "linear-gradient(135deg, #002868 0%, #0063BE 100%)",
+                boxShadow: "0 4px 15px rgba(0,40,104,0.35)",
+                transition: "all 0.25s ease",
+                "&:hover": { boxShadow: "0 6px 20px rgba(0,40,104,0.5)", transform: "translateY(-1px)" },
+                "&:active": { transform: "translateY(0)" },
+                "&.Mui-disabled": { background: "rgba(0,0,0,0.12)", color: "rgba(0,0,0,0.26)" },
+              }}
+            >
+              {ocrPolling ? "Processing…" : "Upload"}
+            </Button>
+          </Stack>
+        )}
+
         {/* Progress bar — orange during OCR, blue otherwise */}
         {uploadProgress > 0 && (
           <LinearProgress
@@ -516,7 +569,7 @@ const handleQuery = async (e) => {
           />
         )}
 
-        {/* Status text */}
+        {/* In-progress status text (upload / OCR) */}
         {uploadStatus && (
           <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
             {uploadStatus}
@@ -535,16 +588,19 @@ const handleQuery = async (e) => {
           </Alert>
         )}
 
-        <Divider sx={{ my: 3 }} />
+        <Divider sx={{ my: 3, borderColor: "rgba(25,118,210,0.12)" }} />
 
         {/* ── Query Section ──────────────────────────────────────── */}
-        <Typography variant="h5" fontWeight={700} gutterBottom>
+        <Typography variant="h6" fontWeight={700} gutterBottom sx={{
+          display: "flex", alignItems: "center", gap: 1.5,
+          "&::before": { content: '""', display: "block", width: 4, height: 20, borderRadius: 2, bgcolor: "secondary.main", flexShrink: 0 },
+        }}>
           Ask a Query
         </Typography>
 
         {/* ── BOM File Filter ─────────────────────────────────────── */}
         {files.length > 0 && (
-          <FormControl size="small" sx={{ mb: 1.5, minWidth: 320 }}>
+          <FormControl size="small" sx={{ mb: 1.5, minWidth: 320, maxWidth: 480 }}>
             <InputLabel id="file-select-label">Filter by BOM file (optional)</InputLabel>
             <Select
               labelId="file-select-label"
@@ -580,7 +636,15 @@ const handleQuery = async (e) => {
             onClick={handleQuery}
             disabled={loading || !query.trim()}
             startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <Search />}
-            sx={{ textTransform: "none", whiteSpace: "nowrap" }}
+            sx={{
+              textTransform: "none", whiteSpace: "nowrap", fontWeight: 600,
+              background: "linear-gradient(135deg, #1976d2 0%, #1565c0 100%)",
+              boxShadow: "0 4px 15px rgba(25,118,210,0.35)",
+              transition: "all 0.25s ease",
+              "&:hover": { boxShadow: "0 6px 20px rgba(25,118,210,0.5)", transform: "translateY(-1px)" },
+              "&:active": { transform: "translateY(0)" },
+              "&.Mui-disabled": { background: "rgba(0,0,0,0.12)", boxShadow: "none" },
+            }}
           >
             {loading ? "Searching…" : "Ask"}
           </Button>
@@ -591,9 +655,13 @@ const handleQuery = async (e) => {
           variant="outlined"
           sx={{
             mt: 2, p: 2, minHeight: 100, borderRadius: 2,
-            background: "#f8f9fa", fontFamily: "monospace",
+            background: "linear-gradient(135deg, #f8faff 0%, #faf8ff 100%)",
+            border: "1px solid rgba(25,118,210,0.15)",
+            fontFamily: "monospace",
             fontSize: "0.88rem", whiteSpace: "pre-wrap",
-            overflowX: "auto", color: "#333"
+            overflowX: "auto", color: "#333",
+            transition: "border-color 0.2s ease",
+            "&:hover": { borderColor: "rgba(25,118,210,0.3)" },
           }}
           ref={answerRef}
         >
@@ -607,8 +675,7 @@ const handleQuery = async (e) => {
             color="success"
             startIcon={<Download />}
             onClick={() => downloadAsExcel(excelData)}
-            sx={{ mt: 2, textTransform: "none", fontWeight: 600 }}
-            fullWidth
+            sx={{ mt: 2, textTransform: "none", fontWeight: 600, width: "fit-content", minWidth: 260 }}
           >
             Download Excel Report&nbsp;
             <Chip
@@ -619,7 +686,7 @@ const handleQuery = async (e) => {
           </Button>
         )}
 
-        <Divider sx={{ my: 3 }} />
+        <Divider sx={{ my: 3, borderColor: "rgba(25,118,210,0.12)" }} />
 
         {/* ── Re-index Section ───────────────────────────────────── */}
         <Stack direction="row" spacing={2} alignItems="center">
@@ -629,7 +696,13 @@ const handleQuery = async (e) => {
             onClick={handleReindex}
             disabled={reindexing}
             startIcon={reindexing ? <CircularProgress size={16} color="inherit" /> : <Autorenew />}
-            sx={{ textTransform: "none" }}
+            sx={{
+              textTransform: "none", fontWeight: 600,
+              borderWidth: 1.5,
+              transition: "all 0.25s ease",
+              "&:hover": { borderWidth: 1.5, transform: "translateY(-1px)", boxShadow: "0 4px 12px rgba(156,39,176,0.2)" },
+              "&:active": { transform: "translateY(0)" },
+            }}
           >
             {reindexing ? "Re-indexing…" : "Re-index Documents"}
           </Button>
@@ -641,8 +714,27 @@ const handleQuery = async (e) => {
           )}
         </Stack>
 
+        </Box>{/* close inner content Box */}
       </Paper>
+      {/* ── Upload toast notification ─────────────────────────── */}
+      <Snackbar
+        open={!!uploadBanner}
+        autoHideDuration={5000}
+        onClose={(_, reason) => { if (reason !== "clickaway") setUploadBanner(null); }}
+        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+      >
+        <Alert
+          severity={uploadBanner?.severity || "info"}
+          onClose={() => setUploadBanner(null)}
+          variant="filled"
+          sx={{ width: "100%" }}
+        >
+          {uploadBanner?.message}
+        </Alert>
+      </Snackbar>
+      </Box>{/* close 60% width Box */}
     </Container>
+    </Box>
   );
 }
 

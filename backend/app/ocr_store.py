@@ -41,6 +41,7 @@ def _load_status() -> Dict:
 
 
 def _save_status(data: Dict) -> None:
+    os.makedirs(OCR_OUTPUTS_DIR, exist_ok=True)
     with open(OCR_STATUS_FILE, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2)
 

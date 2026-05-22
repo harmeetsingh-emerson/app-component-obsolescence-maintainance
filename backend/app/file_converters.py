@@ -657,6 +657,15 @@ def parse_excel_bom(file_path: str) -> List[Dict]:
             print(f"[FileConverter] Structured parse empty for '{sheet_name}' — using LLM analysis")
             parts = _parse_table_intelligent(table, sheet_name, sheet_idx)
 
+        if not parts:
+            # Final fallback: spatial grid pipeline (header detection + LLM row refinement)
+            print(f"[FileConverter] LLM analysis empty for '{sheet_name}' — using spatial grid pipeline")
+            try:
+                from app.spatial_table_extractor import extract_table_from_grid
+                parts = extract_table_from_grid(table, source_name=f"Excel '{sheet_name}'", use_llm=True)
+            except Exception as _sg_exc:
+                print(f"[FileConverter] Spatial grid failed for '{sheet_name}': {_sg_exc}")
+
         all_parts.extend(parts)
 
     print(f"[FileConverter] Excel total: {len(all_parts)} parts across {len(wb.sheetnames)} sheet(s)")
@@ -693,6 +702,14 @@ def parse_csv_bom(file_path: str) -> List[Dict]:
     if not parts:
         print("[FileConverter] CSV structured parse empty — using LLM analysis")
         parts = _parse_table_intelligent(table, "CSV", sheet_idx=1)
+
+    if not parts:
+        print("[FileConverter] CSV LLM analysis empty — using spatial grid pipeline")
+        try:
+            from app.spatial_table_extractor import extract_table_from_grid
+            parts = extract_table_from_grid(table, source_name="CSV", use_llm=True)
+        except Exception as _sg_exc:
+            print(f"[FileConverter] Spatial grid failed for CSV: {_sg_exc}")
 
     print(f"[FileConverter] CSV total: {len(parts)} parts")
     _save_manufacturer_db()
@@ -732,6 +749,15 @@ def parse_word_bom(file_path: str) -> List[Dict]:
         if not parts:
             print(f"[FileConverter] Word table {tbl_idx} structured parse empty — using LLM analysis")
             parts = _parse_table_intelligent(rows, f"Word table {tbl_idx}", tbl_idx)
+
+        if not parts:
+            print(f"[FileConverter] LLM analysis empty for Word table {tbl_idx} — using spatial grid pipeline")
+            try:
+                from app.spatial_table_extractor import extract_table_from_grid
+                parts = extract_table_from_grid(rows, source_name=f"Word table {tbl_idx}", use_llm=True)
+            except Exception as _sg_exc:
+                print(f"[FileConverter] Spatial grid failed for Word table {tbl_idx}: {_sg_exc}")
+
         all_parts.extend(parts)
 
     if not all_parts:
@@ -790,6 +816,16 @@ def parse_pptx_bom(file_path: str) -> List[Dict]:
                     rows, f"Slide {slide_idx} table", page_num=slide_idx,
                     last_mapping=last_mapping,
                 )
+                if not parts:
+                    print(f"[FileConverter] Slide {slide_idx} table structured parse empty — using LLM analysis")
+                    parts = _parse_table_intelligent(rows, f"Slide {slide_idx} table", slide_idx)
+                if not parts:
+                    print(f"[FileConverter] LLM analysis empty for Slide {slide_idx} table — using spatial grid pipeline")
+                    try:
+                        from app.spatial_table_extractor import extract_table_from_grid
+                        parts = extract_table_from_grid(rows, source_name=f"PPTX Slide {slide_idx}", use_llm=True)
+                    except Exception as _sg_exc:
+                        print(f"[FileConverter] Spatial grid failed for Slide {slide_idx}: {_sg_exc}")
                 all_parts.extend(parts)
 
     if not all_parts and all_text_lines:
@@ -856,6 +892,19 @@ def parse_image_bom(file_path: str) -> List[Dict]:
         return []
 
     parts = parse_ocr_bom_text(ocr_text)
+    print(f"[FileConverter] Image flat-OCR: {len(parts)} parts")
+
+    # Spatial fallback: if flat regex parsing found nothing, try coordinate-
+    # aware table extraction (preserves column positions → higher accuracy).
+    if not parts:
+        print("[FileConverter] 0 parts from flat OCR — trying spatial table extractor")
+        try:
+            from app.spatial_table_extractor import extract_table_from_image
+            parts = extract_table_from_image(img_array, use_llm=True)
+            print(f"[FileConverter] Spatial extractor: {len(parts)} parts")
+        except Exception as _spa_exc:
+            print(f"[FileConverter] Spatial extractor failed: {_spa_exc}")
+
     print(f"[FileConverter] Image total: {len(parts)} parts")
     return parts
 

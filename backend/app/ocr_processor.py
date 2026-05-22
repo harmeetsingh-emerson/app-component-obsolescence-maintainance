@@ -126,6 +126,7 @@ KNOWN_MANUFACTURERS_FOR_OCR = {
     'cornell dubilier', 'cde', 'eaton', 'schurter', 'bel fuse', 'bel',
     'pulse electronics', 'pulse', 'epcos', 'koa', 'vishay dale',
     'samsung electro-mechanics', 'cal-chip electronics', 'cal-chip',
+    'cal-chip electronics inc',
     # Semiconductors
     'nxp', 'ti', 'texas instruments', 'analog devices', 'adi', 'maxim',
     'infineon', 'on semi', 'stmicro', 'st micro', 'microchip', 'atmel', 'renesas',
@@ -150,6 +151,10 @@ KNOWN_MANUFACTURERS_FOR_OCR = {
     'instruments', 'electronics', 'technology', 'semiconductor', 
     'electro-mechanics', 'ctro-mechanics', 'mechanics',  # OCR errors
     'nstruments', 'lectronics',  # OCR drops first letter
+    # NOTE: 'cad-cell' intentionally excluded — it is a CAD library footprint
+    # cell reference that appears in Emerson drawing BOMs alongside the real
+    # manufacturer (Analog Devices, TI, Samsung …).  Including it caused
+    # CAD-CELL to be picked as the component manufacturer.
 }
 
 # Common OCR errors in manufacturer names
@@ -171,7 +176,7 @@ OCR_MANUFACTURER_CORRECTIONS = {
     # Additional common OCR errors
     'cal-chip': 'cal-chip',  # Cal-Chip Electronics
     'suntak': 'suntak',  # SUNTAK PCB manufacturer
-    'cad-cell': 'cad-cell',  # CAD-CELL footprint provider
+    # 'cad-cell' intentionally omitted — it is a footprint cell reference, not a manufacturer
     'analog devlces': 'analog devices',
     'analog devces': 'analog devices',
     'texas lnstruments': 'texas instruments',
@@ -284,7 +289,25 @@ def clean_ocr_mpn(mpn: str) -> str:
     # Fix common suffix OCR errors
     # CIG21C2R2MINE -> CIG21C2R2MNE (I→nothing, common in Samsung inductors)
     mpn = re.sub(r'MINE$', 'MNE', mpn)
-    
+
+    # Fix Samsung CL-series cap OCR: 'CLO' → 'CL0'  (letter-O misread as digit-0)
+    # e.g. CLO5B104K05NNNC → CL05B104K05NNNC
+    mpn = re.sub(r'^CLO(\d)', r'CL0\1', mpn)
+
+    # Fix GRM/GMC capacitor series where O is misread for 0
+    # e.g. GMCO4X7R105K → GMC04X7R105K
+    mpn = re.sub(r'^GMCO(\d)', r'GMC0\1', mpn)
+    mpn = re.sub(r'^GRMO(\d)', r'GRM0\1', mpn)
+
+    # Fix letter-O in numeric suffix positions common in GMC/GRM/CL capacitor MPNs.
+    # Pattern: a digit followed by letter-O followed by letters at end of string.
+    # e.g. GMC04X7R105K1ONT → GMC04X7R105K10NT  (1O → 10 before NT)
+    #      GMC04X7R105K1OT  → GMC04X7R105K10T
+    # Only applied when the token has already been identified as a cap MPN
+    # (starts with GMC/GRM/CL/C) to avoid corrupting other MPNs.
+    if re.match(r'^(?:GMC|GRM|CL|GC)', mpn, re.IGNORECASE):
+        mpn = re.sub(r'(\d)O([A-Z]{1,3})$', lambda m: m.group(1) + '0' + m.group(2), mpn)
+
     return mpn
 
 
@@ -465,6 +488,20 @@ def ocr_pdf_to_text(pdf_path: str, dpi: int = 150) -> str:
             img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
                 pix.height, pix.width, 3
             )
+
+            # ── Cap to PaddleOCR's max_side_limit of 4000 px ──────────────────
+            # Without this, PaddleOCR silently downscales large images using
+            # lower-quality interpolation, wasting the extra DPI entirely.
+            # We downscale here first (Lanczos) so quality is predictable.
+            MAX_SIDE = 4000
+            h, w = img_array.shape[:2]
+            if max(h, w) > MAX_SIDE:
+                import cv2
+                scale = MAX_SIDE / max(h, w)
+                new_w, new_h = int(w * scale), int(h * scale)
+                img_array = cv2.resize(img_array, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+                print(f"[OCR]   [RESIZE] {w}x{h} → {new_w}x{new_h} (DPI {dpi} exceeds 4000px limit)")
+            # ──────────────────────────────────────────────────────────────────
 
             raw = list(ocr_engine.predict(img_array))
 
@@ -1191,7 +1228,7 @@ def _parse_emerson_drawing_format(lines: List[str]) -> List[Dict]:
         re.IGNORECASE
     )
 
-    # Words that are definitely NOT MPNs
+    # Words that are definitely NOT MPNs (and also not manufacturers in this format)
     NOT_MPN_WORDS = {
         'CAD-CELL', 'CAD', 'CELL', 'CAP', 'CER', 'RES', 'IC', 'DIODE', 'LED',
         'SMD', 'SMT', 'ROHS', 'WLCSP', 'UNLESS', 'OTHERWISE', 'SPECIFIED',
@@ -1387,8 +1424,13 @@ def _parse_emerson_drawing_format(lines: List[str]) -> List[Dict]:
         # names so no correction is needed.
         group_lower = mfr_lower  # keep alias for consistency
 
+        # CAD-CELL is a footprint library reference in Emerson drawings — skip it.
+        _DRAWING_NON_MFRS = {'cad-cell', 'cad cell'}
+
         found_mfrs = []
         for mfr_key in sorted_mfrs:
+            if mfr_key in _DRAWING_NON_MFRS:
+                continue
             if mfr_key in group_lower:
                 display = mfr_key.title()
                 if display not in found_mfrs:
@@ -1413,13 +1455,27 @@ def _parse_emerson_drawing_format(lines: List[str]) -> List[Dict]:
             if len(found_mfrs_sorted) > 1:
                 alt_mfr = found_mfrs_sorted[1].title()
 
+        # Build standard manufacturers list (same format as all other parsers).
+        # Only include primary_mfr — alt_mfr is unreliable in the drawing format
+        # because manufacturer names can bleed from adjacent anchor groups.
+        manufacturers_list = []
+        if primary_mfr:
+            manufacturers_list.append({
+                'manufacturer': primary_mfr,
+                'mpn': primary_mpn or 'N/A',
+                'preference': 1,
+                'confidence': 0.90,
+            })
+
         part = {
             'part_number': part_number,
             'description': '',
-            'manufacturer': primary_mfr,
-            'mpn': primary_mpn,
-            'alternate_mpn': '',
-            'alternate_manufacturer': alt_mfr,
+            'manufacturers': manufacturers_list,
+            'quantity': '',
+            'designators': '',
+            'confidence': 0.90 if manufacturers_list else 0.55,
+            'page_number': 1,
+            'source': 'emerson_drawing',
         }
         parts.append(part)
         print(f"[DrawingParser]   {part_number} → MPN: {primary_mpn!r}, Mfr: {primary_mfr!r}")

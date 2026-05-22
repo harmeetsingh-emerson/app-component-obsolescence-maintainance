@@ -193,6 +193,25 @@ def _run_ocr_and_store(file_path: str, filename: str, dpi: int = 200) -> None:
         else:
             mark_ocr_failed(filename, "OCR produced no text from any page")
             print(f"[BgOCR] OCR returned no text for '{filename}'")
+            return
+
+        # ── Spatial table extraction → direct FAISS indexing ──────────────
+        # Run a second, coordinate-aware pass over the PDF so parts are
+        # immediately queryable without a separate /ingest-ocr call.
+        print(f"[BgOCR] '{filename}': running spatial table extractor…")
+        try:
+            from app.spatial_table_extractor import extract_table_from_pdf
+            spatial_parts = extract_table_from_pdf(file_path, dpi=dpi, use_llm=True)
+            if spatial_parts:
+                store = get_faiss_store()
+                store.add_parts(spatial_parts, source_file=filename)
+                print(f"[BgOCR] '{filename}': spatial extractor indexed {len(spatial_parts)} parts in FAISS")
+            else:
+                print(f"[BgOCR] '{filename}': spatial extractor found 0 parts (flat text stored for query fallback)")
+        except Exception as _spa_exc:
+            import traceback as _tb
+            print(f"[BgOCR] '{filename}': spatial extractor error — {_spa_exc}")
+            _tb.print_exc()
 
     except Exception as exc:
         import traceback
@@ -208,6 +227,9 @@ async def upload_document(
     file: UploadFile = File(...),
     ocr_dpi: int = Form(200),
 ):
+    # Clamp DPI to the supported range — PaddleOCR's internal cap makes
+    # anything above 300 produce no accuracy gain on standard page sizes.
+    ocr_dpi = max(96, min(300, ocr_dpi))
     """
     Upload a BOM document.
 
@@ -320,6 +342,34 @@ async def upload_document(
                         ),
                     },
                 )
+
+            # Text-based PDF but no parts detected — try spatial grid pipeline
+            # (uses pdfplumber table extraction + header detection + LLM refinement)
+            print(f"[Upload] Text PDF '{file.filename}': 0 parts from BOM parser — trying spatial grid pipeline")
+            try:
+                from app.spatial_table_extractor import extract_table_from_pdf_text
+                parts = extract_table_from_pdf_text(file_path, use_llm=True)
+            except Exception as _spa_exc:
+                import traceback
+                traceback.print_exc()
+                print(f"[Upload] Spatial grid pipeline failed: {_spa_exc}")
+                parts = []
+
+            if parts:
+                total_mfr = sum(len(p.get("manufacturers", [])) for p in parts)
+                store = get_faiss_store()
+                store.add_parts(parts, source_file=file.filename)
+                return {
+                    "success": True,
+                    "filename": file.filename,
+                    "parts_extracted": len(parts),
+                    "total_manufacturer_options": total_mfr,
+                    "storage": "faiss",
+                    "message": (
+                        f"Successfully extracted {len(parts)} parts with {total_mfr} "
+                        f"manufacturer options from '{file.filename}' (spatial pipeline)"
+                    ),
+                }
 
             return JSONResponse(
                 status_code=400,
@@ -725,12 +775,13 @@ async def query_endpoint(request: Request):
                         parsed = parse_ocr_bom_text(ocr_full_text)
                         print(f"[Query] OCR parsed {len(parsed)} parts from '{source}'")
                         for part in parsed:
-                            # Keep parts whose BOM data contains any query token
-                            part_str = _json.dumps(part).upper()
-                            if not query_tokens or any(tok in part_str for tok in query_tokens):
-                                # Tag with source so response formatter can show it
-                                part.setdefault("source_document", source)
-                                ocr_parsed_parts.append(part)
+                            # Include all parts from the matched source document.
+                            # (The document itself was already validated as a match;
+                            #  filtering individual parts by query tokens incorrectly
+                            #  drops drawing-format parts whose part numbers don't
+                            #  appear in the user's query string.)
+                            part.setdefault("source_document", source)
+                            ocr_parsed_parts.append(part)
 
                 # Deduplicate by part_number — keep the entry with the most manufacturers
                 seen_pn: dict = {}
