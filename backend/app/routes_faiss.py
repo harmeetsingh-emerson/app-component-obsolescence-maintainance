@@ -602,6 +602,128 @@ async def query_endpoint(request: Request):
         mfr_filter       = (intent.get("filters") or {}).get("manufacturer")
         desc_filter      = (intent.get("filters") or {}).get("description_contains")
 
+        def _normalize_filter_value(value):
+            """Normalize filter values from LLM (string/list/None) into a single string or None."""
+            if not value:
+                return None
+            if isinstance(value, list):
+                joined = " ".join(str(v).strip() for v in value if str(v).strip())
+                return joined or None
+            normalized = str(value).strip()
+            return normalized or None
+
+        mfr_filter = _normalize_filter_value(mfr_filter)
+        desc_filter = _normalize_filter_value(desc_filter)
+
+        def _norm(v: str) -> str:
+            return str(v or "").strip().lower()
+
+        def _dedupe_excel_rows(excel_rows: list[dict]) -> list[dict]:
+            """Remove exact duplicate rendered rows while preserving first-seen order."""
+            seen: set[tuple] = set()
+            deduped: list[dict] = []
+            for row in excel_rows or []:
+                key = (
+                    _norm(row.get("Parent Part Number")),
+                    _norm(row.get("Requested Part")),
+                    _norm(row.get("Manufacturer Name")),
+                    _norm(row.get("Manufacturer Part Number")),
+                    _norm(row.get("LibRef")),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append(dict(row))
+
+            # Re-number BOM No after dedup so response remains consistent.
+            for idx, row in enumerate(deduped, start=1):
+                row["BOM No"] = idx
+
+            if len(deduped) != len(excel_rows or []):
+                print(f"[Query] Deduped excel rows: {len(excel_rows or [])} -> {len(deduped)}")
+            return deduped
+
+        def _extract_numeric_value(text: str):
+            """Extract the first numeric token from text as float, else None."""
+            import re as _re_num
+            m = _re_num.search(r"-?\d+(?:\.\d+)?", str(text or ""))
+            if not m:
+                return None
+            try:
+                return float(m.group())
+            except (TypeError, ValueError):
+                return None
+
+        def _parse_yeol_constraint(query_text: str):
+            """Parse YEOL threshold constraints from user query.
+
+            Returns tuple(op, threshold) or None.
+            op is one of: gt, ge, lt, le, eq
+            """
+            import re as _re_q
+            q = str(query_text or "").lower()
+
+            patterns = [
+                (r"(?:more than|greater than|over)\s+(\d+(?:\.\d+)?)\s+years?.{0,20}(?:of\s+)?(?:yeol|eol|end[-\s]?of[-\s]?life)", "gt"),
+                (r"(?:at least|minimum of|not less than)\s+(\d+(?:\.\d+)?)\s+years?.{0,20}(?:of\s+)?(?:yeol|eol|end[-\s]?of[-\s]?life)", "ge"),
+                (r"(?:less than|below|under)\s+(\d+(?:\.\d+)?)\s+years?.{0,20}(?:of\s+)?(?:yeol|eol|end[-\s]?of[-\s]?life)", "lt"),
+                (r"(?:at most|maximum of|not more than)\s+(\d+(?:\.\d+)?)\s+years?.{0,20}(?:of\s+)?(?:yeol|eol|end[-\s]?of[-\s]?life)", "le"),
+                (r"(?:yeol|eol|end[-\s]?of[-\s]?life).{0,20}(?:more than|greater than|over)\s+(\d+(?:\.\d+)?)", "gt"),
+                (r"(?:yeol|eol|end[-\s]?of[-\s]?life).{0,20}(?:at least|minimum of|not less than)\s+(\d+(?:\.\d+)?)", "ge"),
+                (r"(?:yeol|eol|end[-\s]?of[-\s]?life).{0,20}(?:less than|below|under)\s+(\d+(?:\.\d+)?)", "lt"),
+                (r"(?:yeol|eol|end[-\s]?of[-\s]?life).{0,20}(?:at most|maximum of|not more than)\s+(\d+(?:\.\d+)?)", "le"),
+            ]
+
+            for pattern, op in patterns:
+                m = _re_q.search(pattern, q)
+                if m:
+                    try:
+                        return op, float(m.group(1))
+                    except (TypeError, ValueError):
+                        return None
+
+            m_eq = _re_q.search(r"(?:yeol|eol|end[-\s]?of[-\s]?life).{0,20}(?:=|equal to|equals)\s*(\d+(?:\.\d+)?)", q)
+            if m_eq:
+                try:
+                    return "eq", float(m_eq.group(1))
+                except (TypeError, ValueError):
+                    return None
+
+            return None
+
+        def _apply_strict_post_review_filter(excel_rows: list[dict], query_text: str) -> list[dict]:
+            """Deterministically enforce numeric YEOL constraints after LLM review."""
+            rule = _parse_yeol_constraint(query_text)
+            if not rule:
+                return excel_rows
+
+            op, threshold = rule
+
+            def _matches(v: float) -> bool:
+                if op == "gt":
+                    return v > threshold
+                if op == "ge":
+                    return v >= threshold
+                if op == "lt":
+                    return v < threshold
+                if op == "le":
+                    return v <= threshold
+                return v == threshold
+
+            strict_rows = []
+            for row in excel_rows or []:
+                yeol_value = _extract_numeric_value(row.get("YEOL"))
+                if yeol_value is None:
+                    continue
+                if _matches(yeol_value):
+                    strict_rows.append(row)
+
+            print(
+                f"[Query] Strict post-review YEOL filter ({op} {threshold}) "
+                f"-> {len(strict_rows)} of {len(excel_rows or [])} row(s)"
+            )
+            return strict_rows
+
         # ── 1. FAISS multi-agent search ───────────────────────────────────
         orchestrator = get_orchestrator()
         result = orchestrator.process_query(query)
@@ -892,26 +1014,14 @@ async def query_endpoint(request: Request):
         # ── Final step: LLM response review via gpt-oss ──────────────────
         # Skip when:
         #  - no data or failed query
-        #  - want_all with no real filter (no-op)
         #  - specific_parts query: upstream already filtered to exactly those parts;
         #    reviewer can't see the internal BOM number → would wrongly return 0 rows
-        #  - single-row result: trivially correct, no filtering needed
-        want_all = intent.get("want_all", False)
-        has_real_filter = bool(
-            mfr_filter or desc_filter or count_limit
-            or any(w in query.lower() for w in [
-                "eol", "yeol", "lifecycle", "rohs", "end-of-life",
-                "discontinued", "active", "last time buy", "ltb"
-            ])
-        )
-        excel_rows = result.get("excel_data") or []
+        excel_rows = _dedupe_excel_rows(result.get("excel_data") or [])
+        result["excel_data"] = excel_rows
         skip_review = (
             not excel_rows
             or not result.get("success")
-            or (want_all and not has_real_filter)
             or bool(specific_parts)          # internal BOM# ≠ MPN in table, would mismatch
-            or len(excel_rows) == 1          # trivially correct, no filtering needed
-            or len(excel_rows) > 200         # too large for LLM review — would take minutes
         )
         if not skip_review:
             from app.multi_agent_faiss import ResponseReviewerAgent
@@ -921,7 +1031,8 @@ async def query_endpoint(request: Request):
                 parts_found=result.get("parts_found", []),
             )
             if reviewed.get("reviewed"):
-                filtered_excel = reviewed["excel_data"]
+                filtered_excel = _apply_strict_post_review_filter(reviewed["excel_data"], query)
+                filtered_excel = _dedupe_excel_rows(filtered_excel)
                 result["excel_data"]  = filtered_excel
                 result["parts_found"] = reviewed["parts_found"]
 

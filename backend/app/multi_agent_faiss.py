@@ -102,33 +102,24 @@ class ResponseReviewerAgent:
     """
 
     SYSTEM_PROMPT = (
-        "You are a BOM (Bill of Materials) data analyst. "
-        "You will receive a user query and a numbered table of BOM parts. "
-        "Your job: identify which rows satisfy the user's request and return ONLY a JSON object.\n\n"
-        "Output format (no prose, no markdown, no code fences):\n"
-        '{"matching_bom_nos": [<integer>, ...], "explanation": "<one sentence>"}\n\n'
-        "Column meanings in the table:\n"
-        "  YEOL      = numeric Years-to-EOL (e.g. 17.1 means 17 years left; blank = unknown)\n"
-        "  Lifecycle = current status: 'Active' (still produced), 'Discontinued'/'EOL' (end-of-life), "
-        "'Ltb' (last-time-buy), 'Unknown'\n"
-        "  RoHS      = RoHS compliance: 'Yes' / 'Yes With Exemption' = compliant; 'No' = non-compliant\n\n"
-        "Rules — follow ALL of these strictly:\n"
-        "1. EOL/lifecycle numeric filters (e.g. 'EOL less than 2 years'): use the YEOL column. "
-        "   A LOWER YEOL means sooner end-of-life. Rows where YEOL is blank have no data "
-        "   — exclude unless the user asks for unknown/missing.\n"
-        "2. Lifecycle status filters (e.g. 'active parts', 'discontinued'): use the Lifecycle column.\n"
-        "3. Manufacturer filters: match the Manufacturer column case-insensitively.\n"
-        "4. RoHS filters: use the RoHS column ('Yes'/'Yes With Exemption' = compliant, 'No' = non-compliant).\n"
-        "5. Count limits (e.g. 'get 5 parts'): return exactly that many BOM Nos, first N.\n"
-        "6. 'All parts' / no specific filter: return every BOM No in the table.\n"
-        "7. CRITICAL: If ALL rows match, list every single BOM No. "
-        "   Never return empty matching_bom_nos unless truly zero rows satisfy the filter.\n"
-        "8. If genuinely no rows match, return: "
-        '{"matching_bom_nos": [], "explanation": "No rows satisfy the query."}\n'
+        "You are a BOM (Bill of Materials) row-level filter. "
+        "You will receive a user query and a table of BOM rows. "
+        "Evaluate each row independently and decide whether it should be kept.\n\n"
+        "CRITICAL RULES:\n"
+        "1. Never keep sibling rows just because they share Parent Part Number.\n"
+        "2. Keep a row only if that specific row satisfies the query constraints.\n"
+        "3. For YEOL numeric filters: use numeric YEOL only. If YEOL is blank/non-numeric, treat as unknown and exclude unless requested.\n"
+        "4. Manufacturer filter must match Manufacturer column (case-insensitive).\n"
+        "5. RoHS filter must use RoHS column only.\n"
+        "6. Lifecycle filters must use Lifecycle column only.\n"
+        "7. Return strict JSON only, no markdown, no prose.\n\n"
+        "Return format:\n"
+        '{"decisions":[{"bom_no":<int>,"keep":<true|false>,"reason":"<short>"},...],"explanation":"<one sentence>"}'
     )
 
-    # Rows per LLM call — keep well within llama3.2:3b's context window
-    CHUNK_SIZE = 25
+    # Keep chunk size conservative to reduce token-limit failures.
+    CHUNK_SIZE = 20
+    MAX_SPLIT_DEPTH = 4
 
     def _lifecycle_label(self, eol_val: str) -> str:
         v = str(eol_val).strip()
@@ -137,18 +128,20 @@ class ResponseReviewerAgent:
         if v == "Not Found in SE": return "Unknown"
         return v or "Unknown"
 
-    def _call_llm_chunk(self, query: str, chunk: List[Dict]) -> set:
+    def _call_llm_chunk(self, query: str, chunk: List[Dict], num_predict: int = 512) -> Optional[set]:
         """
         Send one chunk of rows to the LLM and return the set of matching BOM Nos.
-        Returns None on hard failure (caller should treat as 'all match').
+        Returns None on failure so caller can retry/split.
         """
-        header = "BOM_No|Part|Manufacturer|YEOL|Lifecycle|RoHS"
+        header = "BOM_No|Parent_Part|Part|Manufacturer|MPN|YEOL|Lifecycle|RoHS"
         lines  = [header]
         for row in chunk:
             lines.append(
                 f"{row.get('BOM No','')}|"
+                f"{row.get('Parent Part Number','')}|"
                 f"{row.get('Requested Part','')}|"
                 f"{row.get('Manufacturer Name','')}|"
+                f"{row.get('Manufacturer Part Number','')}|"
                 f"{row.get('YEOL','')}|"
                 f"{self._lifecycle_label(row.get('EOL',''))}|"
                 f"{row.get('RoHS','')}"
@@ -164,20 +157,20 @@ class ResponseReviewerAgent:
                 {"role": "user",   "content": user_message}
             ],
             "stream": False,
-            "options": {"temperature": 0, "num_predict": 512}
+            "options": {"temperature": 0, "num_predict": num_predict}
         }
 
         try:
             resp = requests.post(OLLAMA_CHAT_URL, json=payload, timeout=120)
         except requests.exceptions.ReadTimeout:
-            print("[ReviewAgent] Chunk timed out — skipping chunk, treating all rows as matching")
+            print("[ReviewAgent] Chunk timed out")
             return None
         except requests.exceptions.ConnectionError as exc:
-            print(f"[ReviewAgent] Connection error ({exc}) — skipping chunk")
+            print(f"[ReviewAgent] Connection error ({exc})")
             return None
 
         if resp.status_code != 200:
-            print(f"[ReviewAgent] Ollama HTTP {resp.status_code} on chunk — skipping chunk")
+            print(f"[ReviewAgent] Ollama HTTP {resp.status_code} on chunk")
             return None
 
         resp_json  = resp.json()
@@ -186,21 +179,74 @@ class ResponseReviewerAgent:
         done_reason = resp_json.get("done_reason", "")
 
         if done_reason == "length":
-            print("[ReviewAgent] Chunk hit token limit — treating all rows in chunk as matching")
-            return {row.get("BOM No") for row in chunk}
+            print("[ReviewAgent] Chunk hit token limit")
+            return None
 
-        json_match = re.search(r'\{.*?\}', content, re.DOTALL)
+        json_match = re.search(r'\{[\s\S]*\}', content, re.DOTALL)
         if not json_match:
-            print(f"[ReviewAgent] No JSON in chunk response ({len(content)} chars) — treating all rows as matching")
-            return {row.get("BOM No") for row in chunk}
+            print(f"[ReviewAgent] No JSON in chunk response ({len(content)} chars)")
+            return None
 
         try:
             parsed = json.loads(json_match.group())
         except json.JSONDecodeError:
-            print("[ReviewAgent] JSON parse error on chunk — treating all rows as matching")
-            return {row.get("BOM No") for row in chunk}
+            print("[ReviewAgent] JSON parse error on chunk")
+            return None
 
-        return set(parsed.get("matching_bom_nos", []))
+        # Preferred schema: explicit row decisions.
+        decisions = parsed.get("decisions")
+        if isinstance(decisions, list):
+            kept = set()
+            for d in decisions:
+                if not isinstance(d, dict):
+                    continue
+                if not d.get("keep", False):
+                    continue
+                bom_no = d.get("bom_no")
+                if isinstance(bom_no, int):
+                    kept.add(bom_no)
+                else:
+                    bom_no_str = str(bom_no or "").strip()
+                    if bom_no_str.isdigit():
+                        kept.add(int(bom_no_str))
+            return kept
+
+        # Backward compatibility with older prompt format.
+        if isinstance(parsed.get("matching_bom_nos"), list):
+            return set(parsed.get("matching_bom_nos", []))
+
+        return None
+
+    def _review_chunk_recursive(self, query: str, chunk: List[Dict], depth: int = 0) -> Optional[set]:
+        """
+        Try to review a chunk; on failure, retry with smaller output and then split recursively.
+        Returns None if the chunk could not be resolved by the model.
+        """
+        result = self._call_llm_chunk(query, chunk, num_predict=512)
+        if result is not None:
+            return result
+
+        result = self._call_llm_chunk(query, chunk, num_predict=256)
+        if result is not None:
+            return result
+
+        if len(chunk) <= 1 or depth >= self.MAX_SPLIT_DEPTH:
+            print(f"[ReviewAgent] Unresolved chunk at depth={depth}, size={len(chunk)}")
+            return None
+
+        mid = len(chunk) // 2
+        left = self._review_chunk_recursive(query, chunk[:mid], depth + 1)
+        right = self._review_chunk_recursive(query, chunk[mid:], depth + 1)
+
+        if left is None and right is None:
+            return None
+
+        merged = set()
+        if left is not None:
+            merged.update(left)
+        if right is not None:
+            merged.update(right)
+        return merged
 
     def review(self, query: str, excel_data: List[Dict],
                parts_found: List[Dict]) -> Dict:
@@ -236,13 +282,14 @@ class ResponseReviewerAgent:
 
             matching_nos: set = set()
             all_failed = True
+            unresolved_chunks = 0
 
             for idx, chunk in enumerate(chunks, 1):
                 print(f"[ReviewAgent] Chunk {idx}/{total_chunks}: {len(chunk)} rows")
-                result = self._call_llm_chunk(query, chunk)
+                result = self._review_chunk_recursive(query, chunk)
                 if result is None:
-                    # Hard failure — treat whole chunk as matching (safe fallback)
-                    matching_nos.update(row.get("BOM No") for row in chunk)
+                    unresolved_chunks += 1
+                    print(f"[ReviewAgent] Chunk {idx} unresolved — keeping no rows from this chunk")
                 else:
                     all_failed = False
                     matching_nos.update(result)
@@ -251,7 +298,10 @@ class ResponseReviewerAgent:
                 print("[ReviewAgent] All chunks failed — returning unfiltered data")
                 return fallback
 
-            explanation = f"Reviewed {len(excel_data)} rows in {total_chunks} batch(es)."
+            explanation = (
+                f"Reviewed {len(excel_data)} rows in {total_chunks} batch(es); "
+                f"unresolved chunks: {unresolved_chunks}."
+            )
             print(f"[ReviewAgent] LLM matched BOM nos across all chunks: {sorted(matching_nos)}")
 
             if not matching_nos:
