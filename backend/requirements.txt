@@ -16,3 +16,4 @@ requests
 openpyxl
 python-pptx
 Pillow
+python-multipart
