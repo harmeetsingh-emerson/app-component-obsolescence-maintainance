@@ -441,7 +441,7 @@ const handleQuery = async (e) => {
           display: "flex", alignItems: "center", gap: 1.5,
           "&::before": { content: '""', display: "block", width: 4, height: 20, borderRadius: 2, bgcolor: "primary.main", flexShrink: 0 },
         }}>
-          Upload Document
+          Upload BOM Document
         </Typography>
 
         {/* ── Step 1: Choose file ─────────────────────────────────── */}

@@ -29,7 +29,7 @@ services:
     image: ai-customer-support:dev-backend
     container_name: ai-cs-backend-dev
     ports:
-      - "8000:8000"
+      - "9999:8000"
     volumes:
       # Bind-mount source directories for hot-reload
       - ./app:/app/app
@@ -53,7 +53,7 @@ services:
     image: ai-customer-support:dev-frontend
     container_name: ai-cs-frontend-dev
     ports:
-      - "3000:3000"
+      - "9998:3000"
     volumes:
       # Bind-mount only src/ and public/ — node_modules stays in the image
       - ../frontend/src:/app/src
@@ -61,7 +61,7 @@ services:
     environment:
       # Browser (not the container) makes API calls, so localhost:8000
       # resolves to the host's exposed backend port.
-      - REACT_APP_API_URL=http://localhost:8000
+      - REACT_APP_API_URL=http://localhost:9999
       - CHOKIDAR_USEPOLLING=true
       - WATCHPACK_POLLING=true
       - WDS_SOCKET_PORT=0   # fixes HMR websocket behind Docker port mapping

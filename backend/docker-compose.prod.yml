@@ -20,7 +20,7 @@ services:
     image: ai-customer-support:prod
     container_name: ai-customer-support-prod
     ports:
-      - "8000:8000"
+      - "9999:8000"
     volumes:
       # Named volumes keep uploaded documents, OCR extractions, and the
       # FAISS index across container restarts and rebuilds.

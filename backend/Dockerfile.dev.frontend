@@ -16,6 +16,7 @@ WORKDIR /app
 # not in the bind-mounted src volume, so they don't get overwritten).
 COPY package*.json ./
 RUN npm ci --silent
+RUN npm ci --legacy-peer-deps
 
 # src/ and public/ are mounted at runtime — no COPY needed here.
 
