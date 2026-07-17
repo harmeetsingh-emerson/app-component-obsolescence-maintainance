@@ -23,7 +23,7 @@ SE_CRED = {'login': 'emerson_api', 'api_key': 'Em$809@rRt2'}
 _OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
 OLLAMA_CHAT_URL = f"{_OLLAMA_BASE}/api/chat"
 OLLAMA_INTENT_MODEL = "llama3.2:3b"
-OLLAMA_REVIEW_MODEL = "gpt-oss:latest"
+OLLAMA_REVIEW_MODEL = "gpt-oss:20b"
 
 
 # ============= AGENT 0: Query Intent Agent =============
