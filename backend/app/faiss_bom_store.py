@@ -28,7 +28,7 @@ class FAISSBOMStore:
         self.metadata_path = os.path.join(storage_dir, "metadata.pkl")
         self.json_path = os.path.join(storage_dir, "parts_readable.json")
         self.embedding_model = "nomic-embed-text"
-        _ollama_base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+        _ollama_base = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
         self.embedding_url = f"{_ollama_base}/api/embeddings"
         
         # Create storage directory

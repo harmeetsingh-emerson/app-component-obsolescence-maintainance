@@ -75,7 +75,7 @@ else:
     @app.get("/")
     @app.get("/ui")
     def get_ui():
-        ui_path = os.path.join(_BASE_DIR, "frontend", "ui.html")
+        ui_path = os.path.join(_BASE_DIR, "build", "index.html")
         return FileResponse(ui_path, media_type="text/html")
 
 
@@ -114,4 +114,4 @@ async def startup_event():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8008)
+    uvicorn.run(app, host="10.14.5.85", port=8008)
