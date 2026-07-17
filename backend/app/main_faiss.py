@@ -14,6 +14,10 @@ import os
 # Must be set BEFORE any paddle/numpy import.
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
+# Get the host from environment, default to 0.0.0.0
+HOST = os.getenv("BACKEND_HOST", "0.0.0.0")
+PORT = int(os.getenv("BACKEND_PORT", "8008"))
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -110,4 +114,4 @@ async def startup_event():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8009)
+    uvicorn.run(app, host=HOST, port=PORT)

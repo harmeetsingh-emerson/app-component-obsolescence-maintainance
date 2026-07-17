@@ -1,4 +1,4 @@
-# App Component Obsolescence Maintenance
+<!-- # App Component Obsolescence Maintenance
 
 A full-stack application for querying Bill of Materials (BOM) documents using FAISS vector embeddings, multi-agent processing, OCR extraction, and an LLM backend powered by Ollama.
 
@@ -333,4 +333,4 @@ docker-compose -f docker-compose.dev.yml restart frontend
 # Find what is using port 8000
 netstat -ano | findstr :8000    # Windows
 lsof -i :8000                   # macOS / Linux
-```
+``` -->
