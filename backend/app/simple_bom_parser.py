@@ -576,6 +576,43 @@ def _extract_table_from_ocr(ocr_data: Dict) -> List[List[str]]:
     return rows[3:] if len(rows) > 3 else rows
 
 
+def _pick_best_part_number_column(df, header_row_idx, candidate_cols: list) -> int:
+    """
+    Several headers (e.g. 'PART NUMBER', 'Non-6 digit Part Number', 'Generate New
+    Part Number') can all loosely match 'PART'+'NUMBER'. Pick the column whose
+    data actually looks like identifiers, not whichever header matched last.
+    """
+    if len(candidate_cols) == 1:
+        return candidate_cols[0]
+
+    status_words = {
+        'done', 'yes', 'no', 'ok', 'okay', 'retain', 'pending', 'completed',
+        'approved', 'rejected', 'tbd', 'n/a', 'na', 'draft', 'active',
+        'inactive', 'true', 'false', 'unique', 'sequential', 'smart', 'excel',
+    }
+    sample = df.iloc[header_row_idx + 1: header_row_idx + 9]
+
+    best_col, best_score = candidate_cols[0], -1.0
+    for col_idx in candidate_cols:
+        total = good = 0
+        for _, row in sample.iterrows():
+            if col_idx >= len(row):
+                continue
+            cell = str(row[col_idx]).strip()
+            if not cell or cell.lower() in ('nan', 'n/a', '-', ''):
+                continue
+            total += 1
+            if cell.lower() not in status_words and re.search(r'\d', cell) and len(cell) >= 3:
+                good += 1
+        score = (good / total) if total else 0.0
+        if score > best_score:
+            best_score, best_col = score, col_idx
+
+    print(f"[BOM Parser] Resolved part_number conflict among columns {candidate_cols} "
+          f"→ {best_col} (score={best_score:.2f})")
+    return best_col
+
+
 def _parse_table_dataframe(df) -> List[Dict[str, str]]:
     """Parse pandas DataFrame from Camelot - Extract ALL manufacturers and MPNs"""
     
@@ -590,13 +627,14 @@ def _parse_table_dataframe(df) -> List[Dict[str, str]]:
         
         if 'PART' in row_text and 'NUMBER' in row_text:
             header_row_idx = idx
+            part_number_candidates = []
             
             # Map column names to indices - SUPPORT MULTIPLE MANUFACTURERS
             for col_idx, cell in enumerate(row):
                 cell_upper = str(cell).upper().strip()
                 
                 if 'PART' in cell_upper and 'NUMBER' in cell_upper and 'MANUFACTURER' not in cell_upper:
-                    columns_map['part_number'] = col_idx
+                    part_number_candidates.append(col_idx)
                 elif 'DESCRIPTION' in cell_upper:
                     columns_map['description'] = col_idx
                 elif 'QTY' in cell_upper or 'QUANTITY' in cell_upper:
@@ -624,6 +662,11 @@ def _parse_table_dataframe(df) -> List[Dict[str, str]]:
                         columns_map[f'mpn_{mpn_num}'] = col_idx
                     elif 'mpn_1' not in columns_map:
                         columns_map['mpn_1'] = col_idx
+            
+            if part_number_candidates:
+                columns_map['part_number'] = _pick_best_part_number_column(
+                    df, header_row_idx, part_number_candidates
+                )
             
             break
     

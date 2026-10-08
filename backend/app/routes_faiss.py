@@ -601,6 +601,8 @@ async def query_endpoint(request: Request):
         specific_parts   = intent.get("specific_parts", [])  # e.g. ["563969-472"]
         mfr_filter       = (intent.get("filters") or {}).get("manufacturer")
         desc_filter      = (intent.get("filters") or {}).get("description_contains")
+        yeol_max         = (intent.get("filters") or {}).get("yeol_max")
+        lifecycle_filter = (intent.get("filters") or {}).get("lifecycle")
 
         def _normalize_filter_value(value):
             """Normalize filter values from LLM (string/list/None) into a single string or None."""
@@ -614,9 +616,38 @@ async def query_endpoint(request: Request):
 
         mfr_filter = _normalize_filter_value(mfr_filter)
         desc_filter = _normalize_filter_value(desc_filter)
+        lifecycle_filter = _normalize_filter_value(lifecycle_filter)
+        if mfr_filter and mfr_filter.lower() in {"manufacturer", "manufacturers", "vendor", "vendors", "mfr", "mfrs", "all"}:
+            mfr_filter = None
+        try:
+            yeol_max = float(yeol_max) if yeol_max is not None else None
+        except (TypeError, ValueError):
+            yeol_max = None
+
+        has_structured_filter = bool(mfr_filter or desc_filter or yeol_max is not None or lifecycle_filter)
 
         def _norm(v: str) -> str:
             return str(v or "").strip().lower()
+
+        def _apply_structured_filters(excel_rows: list[dict]) -> list[dict]:
+            """Deterministic Python filtering for manufacturer/description/YEOL/lifecycle —
+            avoids an LLM review pass entirely when the query maps cleanly to these columns."""
+            rows = excel_rows
+            if mfr_filter:
+                needle = _norm(mfr_filter)
+                rows = [r for r in rows if needle in _norm(r.get("Manufacturer Name"))]
+            if desc_filter:
+                needle = _norm(desc_filter)
+                rows = [r for r in rows if needle in _norm(r.get("Description"))]
+            if yeol_max is not None:
+                def _yeol_ok(r):
+                    v = str(r.get("YEOL", "")).strip()
+                    return v.replace(".", "", 1).isdigit() and float(v) <= yeol_max
+                rows = [r for r in rows if _yeol_ok(r)]
+            if lifecycle_filter:
+                needle = _norm(lifecycle_filter)
+                rows = [r for r in rows if needle in _norm(r.get("EOL"))]
+            return rows
 
         def _dedupe_excel_rows(excel_rows: list[dict]) -> list[dict]:
             """Remove exact duplicate rendered rows while preserving first-seen order."""
@@ -651,15 +682,23 @@ async def query_endpoint(request: Request):
         # If a specific file was requested but the query has no extractable part-number
         # tokens (e.g. "get me details of part numbers"), return ALL parts from that file.
         _fallback_handled = False  # prevents double SE call in the filter block below
-        if filename_filter and not result.get("parts_found"):
+        import re as _re_focus
+        from app.multi_agent_faiss import PartNumberExtractorAgent as _PNFocus
+        _mfr_focus = bool(_re_focus.search(r"\b(manufacturers?|vendors?|mfrs?)\b", query, _re_focus.I)) and not specific_parts
+        _generic_all = (
+            _mfr_focus and not has_structured_filter and not count_limit
+            and not _PNFocus().extract(query)
+        )
+        _scope_label = filename_filter or "all indexed files"
+        if (filename_filter or _generic_all) and (not result.get("parts_found") or _generic_all):
             from app.multi_agent_faiss import SiliconExpertAgent, ResponseFormatterAgent
             store_fb = get_faiss_store()
             all_file_parts = [
                 p for p in store_fb.get_all_parts()
-                if p.get("source_file") == filename_filter
+                if not filename_filter or p.get("source_file") == filename_filter
             ]
             # Also check OCR store for this file
-            if not all_file_parts:
+            if filename_filter and not all_file_parts:
                 ocr_text_fb = get_ocr_text_for_source(filename_filter)
                 if ocr_text_fb:
                     all_file_parts = parse_ocr_bom_text(ocr_text_fb)
@@ -729,7 +768,7 @@ async def query_endpoint(request: Request):
                     }
                     _fallback_handled = True
                 else:
-                    print(f"[Query] Generic query + filename filter → returning {len(all_file_parts)} parts from '{filename_filter}'")
+                    print(f"[Query] Generic query + filename filter → returning {len(all_file_parts)} parts from '{_scope_label}'")
                     _se_fb = SiliconExpertAgent()
                     _api_fb = _se_fb.search_all_manufacturers(all_file_parts)
                     _fmt_fb = ResponseFormatterAgent()
@@ -739,7 +778,7 @@ async def query_endpoint(request: Request):
                         "api_data": _api_fb,
                         "formatted_response": _fmt_fb.format(all_file_parts, _api_fb),
                         "excel_data": _fmt_fb.prepare_excel_data(all_file_parts, _api_fb),
-                        "message": f"Found {len(all_file_parts)} part(s) in '{filename_filter}'",
+                        "message": f"Found {len(all_file_parts)} part(s) in '{_scope_label}'",
                     }
                     _fallback_handled = True
 
@@ -935,12 +974,23 @@ async def query_endpoint(request: Request):
         #  - no data or failed query
         #  - specific_parts query: upstream already filtered to exactly those parts;
         #    reviewer can't see the internal BOM number → would wrongly return 0 rows
+        #  - a structured filter (manufacturer/description/YEOL/lifecycle) was detected:
+        #    applied deterministically in Python below, no LLM call needed
+        #  - "want all, no filter": nothing to filter, return as-is
         excel_rows = _dedupe_excel_rows(result.get("excel_data") or [])
+
+        if excel_rows and has_structured_filter and not specific_parts:
+            excel_rows = _apply_structured_filters(excel_rows)
+            print(f"[Query] Structured filter applied (no LLM): {len(excel_rows)} row(s) kept")
+
         result["excel_data"] = excel_rows
         skip_review = (
             not excel_rows
             or not result.get("success")
             or bool(specific_parts)          # internal BOM# ≠ MPN in table, would mismatch
+            or has_structured_filter         # already deterministically filtered above
+            or _mfr_focus                    # manufacturer-focused listing: return every row
+            or (intent.get("want_all") and not count_limit)  # nothing left to filter
         )
         if not skip_review:
             from app.multi_agent_faiss import ResponseReviewerAgent
@@ -953,6 +1003,7 @@ async def query_endpoint(request: Request):
                 filtered_excel = reviewed["excel_data"]
                 result["excel_data"]  = filtered_excel
                 result["parts_found"] = reviewed["parts_found"]
+
 
                 if filtered_excel:
                     # Build formatted_response directly from filtered excel rows
@@ -1004,7 +1055,7 @@ async def query_endpoint(request: Request):
 
         # ── Build rich formatted_response when reviewer was skipped ──────
         # (specific-part queries, single-row results, want_all with no filter)
-        elif skip_review and excel_rows and result.get("success"):
+        elif skip_review and excel_rows and result.get("success") and not _mfr_focus:
             lines = [f"Found {len(excel_rows)} matching row(s) for your query:"]
             for _row in excel_rows:
                 _bom    = _row.get("BOM No", "?")
@@ -1038,6 +1089,26 @@ async def query_endpoint(request: Request):
                 if _ds:
                     lines.append(f"  Datasheet      : {_ds}")
             result["formatted_response"] = "\n".join(lines)
+
+        if _mfr_focus and excel_rows and result.get("success"):
+            groups: dict = {}
+            for _row in excel_rows:
+                _name = str(_row.get("Manufacturer Name") or "UNKNOWN").strip() or "UNKNOWN"
+                groups.setdefault(_name.lower(), (_name, []))[1].append(_row)
+
+            lines = [f"Found {len(groups)} manufacturer(s) across {len(excel_rows)} manufacturer-part row(s):"]
+            for _name, _rows in sorted(groups.values(), key=lambda g: (-len(g[1]), g[0].lower())):
+                _parents = {r.get("Parent Part Number") for r in _rows if r.get("Parent Part Number")}
+                lines.append(f"\n  ─── {_name} — {len(_rows)} MPN row(s), {len(_parents)} part(s) ───")
+                for _r in _rows:
+                    _mpn = _r.get("Manufacturer Part Number") or _r.get("Requested Part", "")
+                    lines.append(
+                        f"    {_mpn} | Part {_r.get('Parent Part Number', '')} | "
+                        f"Lifecycle {_r.get('EOL', '')} | RoHS {_r.get('RoHS', '')} | "
+                        f"YEOL {_r.get('YEOL') or 'Unknown'}"
+                    )
+            result["formatted_response"] = "\n".join(lines)
+            result["message"] = f"{len(groups)} manufacturer(s), {len(excel_rows)} row(s)"
 
         return result
 

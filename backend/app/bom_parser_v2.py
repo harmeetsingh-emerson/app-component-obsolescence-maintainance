@@ -139,6 +139,22 @@ PART_NUMBER_PATTERNS = [
     r'[A-Z0-9]{3,}-[A-Z0-9]{3,}',  # ABC-DEF123
 ]
 
+# Headers that name a *person/role/workflow* column (e.g. "Component Review PIC",
+# "Approver") — a weak generic keyword match (like bare 'component') should never
+# win against these, since their data is names/dates/statuses, not part data.
+_NON_DATA_HEADER_WORDS = {
+    'pic', 'approver', 'reviewer', 'requestor', 'requester', 'owner',
+    'status', 'date', 'ticket', 'remarks', 'concerns', 'disposition',
+    'action', 'recommendation', 'creation',
+}
+_NON_DATA_HEADER_RE = re.compile(
+    r'\b(' + '|'.join(_NON_DATA_HEADER_WORDS) + r')\b'
+)
+
+
+def _is_role_or_status_header(header: str) -> bool:
+    return bool(_NON_DATA_HEADER_RE.search(header))
+
 
 @dataclass
 class BOMTableDetection:
@@ -386,6 +402,57 @@ def _infer_columns_from_content(
     return col_map
 
 
+# Values that show up in workflow/status columns whose headers happen to contain
+# "part number"/"item" etc. (e.g. "Generate New Part Number", "ItemID") — never
+# real identifiers, so a column dominated by these can't be the real part number.
+STATUS_VALUE_WORDS = {
+    'done', 'yes', 'no', 'ok', 'okay', 'retain', 'pending', 'completed',
+    'approved', 'rejected', 'tbd', 'n/a', 'na', 'draft', 'active', 'inactive',
+    'true', 'false', 'unique', 'sequential', 'smart', 'excel', 'open', 'closed',
+}
+
+
+def _column_identifier_score(table: List[List[str]], header_row_idx: int, col_idx: int,
+                              max_rows: int = 8) -> float:
+    """
+    Fraction of sampled data-row cells in col_idx that actually look like a
+    real identifier (has a digit, reasonable length, not a status word) —
+    used to tell a genuine part-number column apart from a status column
+    whose header merely contains matching keywords.
+    """
+    rows = table[header_row_idx + 1: header_row_idx + 1 + max_rows]
+    total = good = 0
+    for row in rows:
+        if col_idx >= len(row):
+            continue
+        cell = str(row[col_idx]).strip() if row[col_idx] else ''
+        if not cell or cell.lower() in ('n/a', '-', 'none', ''):
+            continue
+        total += 1
+        if cell.lower() not in STATUS_VALUE_WORDS and re.search(r'\d', cell) and len(cell) >= 3:
+            good += 1
+    return (good / total) if total else 0.0
+
+
+def _resolve_column_conflict(table: List[List[str]], header_row_idx: int,
+                              candidates: List[Tuple[int, str, str]]) -> Tuple[int, str, str]:
+    """
+    Several column headers in the same row matched the same semantic key
+    (e.g. 'PART NUMBER', 'PN in Altium' and 'Generate New Part Number' all
+    loosely match 'part_number'). Pick the column whose actual data looks
+    right, instead of whichever header text happened to match last.
+    """
+    best = candidates[0]
+    best_score = -1.0
+    for col_idx, pattern, header in candidates:
+        header_score = len(pattern) + (10 if header.strip() == pattern else 0)
+        content_score = _column_identifier_score(table, header_row_idx, col_idx) * 20
+        total = header_score + content_score
+        if total > best_score:
+            best_score, best = total, (col_idx, pattern, header)
+    return best
+
+
 def detect_bom_structure(table: List[List[str]], page_num: int = 1) -> BOMTableDetection:
     """
     Step 3: Detect BOM intent BEFORE extracting data
@@ -416,14 +483,13 @@ def detect_bom_structure(table: List[List[str]], page_num: int = 1) -> BOMTableD
         # Check for BOM indicator keywords
         row_text = ' '.join(normalized_headers)
         
-        # Count BOM column matches
-        matches = 0
-        temp_column_map = {}
-        assigned_columns = set()  # Track which columns have been assigned
+        # Collect ALL columns whose header matches each semantic key — resolved below,
+        # instead of letting whichever column is scanned last silently win.
+        candidates: Dict[str, List[Tuple[int, str, str]]] = {}
         
         for col_idx, header in enumerate(normalized_headers):
-            if col_idx in assigned_columns:
-                continue  # Skip columns that are already mapped
+            if not header:
+                continue
             
             best_match = None
             best_pattern = ""
@@ -446,12 +512,30 @@ def detect_bom_structure(table: List[List[str]], page_num: int = 1) -> BOMTableD
                         best_pattern = pattern
                         best_key = key
             
-            # Assign the best match for this column
+            # A weak/generic match (short pattern) shouldn't win on a column whose
+            # header names a person/role/workflow field instead of part data.
+            if best_match and len(best_pattern) < 12 and _is_role_or_status_header(header):
+                bom_signals.append(f"Rejected weak match '{best_pattern}' on role/status header '{header}'")
+                best_match = None
+            
             if best_match:
-                temp_column_map[best_key] = col_idx
-                assigned_columns.add(col_idx)
-                matches += 1
-                bom_signals.append(f"Found '{best_pattern}' in column {col_idx}")
+                candidates.setdefault(best_key, []).append((col_idx, best_pattern, header))
+        
+        # Resolve one winning column per semantic key
+        matches = 0
+        temp_column_map = {}
+        for key, cands in candidates.items():
+            if len(cands) == 1:
+                col_idx, pattern, header = cands[0]
+            else:
+                col_idx, pattern, header = _resolve_column_conflict(table, row_idx, cands)
+                other_cols = [c for c, _, _ in cands if c != col_idx]
+                bom_signals.append(
+                    f"Resolved '{key}' conflict: column {col_idx} chosen over {other_cols} by content"
+                )
+            temp_column_map[key] = col_idx
+            matches += 1
+            bom_signals.append(f"Found '{pattern}' in column {col_idx}")
         
         # If we found strong BOM indicators, this is likely our header row
         # Require at least 2 BOM columns (e.g. just "Part No" + "Manufacturer")
@@ -647,10 +731,9 @@ def parse_bom_row(row: List[str], column_map: Dict[str, int], page_num: int) -> 
     # CRITICAL FIX #1: Check if row is too short for required columns
     # Allow shorter rows, but skip if critical columns are missing
     if len(row) < max_col_needed + 1:
-        # Row is too short to contain all mapped columns
-        return None
+        row = list(row) + [''] * (max_col_needed + 1 - len(row))
     
-    for i in range(1, 5):
+    for i in range(1, 9):
         mfr_key = f'manufacturer_{i}' if f'manufacturer_{i}' in column_map else 'manufacturer'
         mpn_key = f'mpn_{i}' if f'mpn_{i}' in column_map else 'mpn'
         

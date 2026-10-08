@@ -22,8 +22,8 @@ SE_CRED = {'login': 'emerson_api', 'api_key': 'Em$809@rRt2'}
 
 _OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
 OLLAMA_CHAT_URL = f"{_OLLAMA_BASE}/api/chat"
-OLLAMA_INTENT_MODEL = "llama3.2:3b"
-OLLAMA_REVIEW_MODEL = "gpt-oss:20b"
+OLLAMA_INTENT_MODEL = "llama3.1:8b"
+OLLAMA_REVIEW_MODEL = "llama3.1:8b"
 
 
 # ============= AGENT 0: Query Intent Agent =============
@@ -44,19 +44,23 @@ class QueryIntentAgent:
         '  "specific_parts": [<string>, ...], // any specific part numbers mentioned\n'
         '  "filters": {                       // any attribute filters mentioned\n'
         '    "manufacturer": <string or null>,\n'
-        '    "description_contains": <string or null>\n'
+        '    "description_contains": <string or null>,\n'
+        '    "yeol_max": <number or null>,     // years-to-EOL upper bound, e.g. "YEOL < 5" -> 5\n'
+        '    "lifecycle": <string or null>     // e.g. "obsolete", "discontinued", "active"\n'
         "  }\n"
         "}\n"
         "Examples:\n"
-        '- "get me 5 part numbers" → {"limit":5,"want_all":false,"specific_parts":[],"filters":{"manufacturer":null,"description_contains":null}}\n'
-        '- "get me all part numbers" → {"limit":null,"want_all":true,"specific_parts":[],"filters":{"manufacturer":null,"description_contains":null}}\n'
-        '- "show details of 563969-472" → {"limit":1,"want_all":false,"specific_parts":["563969-472"],"filters":{"manufacturer":null,"description_contains":null}}\n'
-        '- "get 10 capacitors from Yageo" → {"limit":10,"want_all":false,"specific_parts":[],"filters":{"manufacturer":"Yageo","description_contains":"capacitor"}}\n'
+        '- "get me 5 part numbers" → {"limit":5,"want_all":false,"specific_parts":[],"filters":{"manufacturer":null,"description_contains":null,"yeol_max":null,"lifecycle":null}}\n'
+        '- "get me all part numbers" → {"limit":null,"want_all":true,"specific_parts":[],"filters":{"manufacturer":null,"description_contains":null,"yeol_max":null,"lifecycle":null}}\n'
+        '- "show details of 563969-472" → {"limit":1,"want_all":false,"specific_parts":["563969-472"],"filters":{"manufacturer":null,"description_contains":null,"yeol_max":null,"lifecycle":null}}\n'
+        '- "get 10 capacitors from Yageo" → {"limit":10,"want_all":false,"specific_parts":[],"filters":{"manufacturer":"Yageo","description_contains":"capacitor","yeol_max":null,"lifecycle":null}}\n'
+        '- "list parts with YEOL less than 5" → {"limit":null,"want_all":true,"specific_parts":[],"filters":{"manufacturer":null,"description_contains":null,"yeol_max":5,"lifecycle":null}}\n'
+        '- "show obsolete parts" → {"limit":null,"want_all":true,"specific_parts":[],"filters":{"manufacturer":null,"description_contains":null,"yeol_max":null,"lifecycle":"obsolete"}}\n'
     )
 
     def parse(self, query: str) -> Dict:
         """Call Ollama LLM to parse query intent. Returns intent dict."""
-        default = {"limit": None, "want_all": False, "specific_parts": [], "filters": {"manufacturer": None, "description_contains": None}}
+        default = {"limit": None, "want_all": False, "specific_parts": [], "filters": {"manufacturer": None, "description_contains": None, "yeol_max": None, "lifecycle": None}}
         try:
             payload = {
                 "model": OLLAMA_INTENT_MODEL,
@@ -112,14 +116,16 @@ class ResponseReviewerAgent:
         "4. Manufacturer filter must match Manufacturer column (case-insensitive).\n"
         "5. RoHS filter must use RoHS column only.\n"
         "6. Lifecycle filters must use Lifecycle column only.\n"
-        "7. Return strict JSON only, no markdown, no prose.\n\n"
-        "Return format:\n"
-        '{"decisions":[{"bom_no":<int>,"keep":<true|false>,"reason":"<short>"},...],"explanation":"<one sentence>"}'
+        "7. Return ONLY the BOM_No values to keep — no per-row reasons, no markdown, no prose.\n\n"
+        "Return format (compact — this keeps output short enough to avoid truncation):\n"
+        '{"matching_bom_nos":[<int>,...],"explanation":"<one short sentence>"}'
     )
 
-    # Keep chunk size conservative to reduce token-limit failures.
-    CHUNK_SIZE = 20
-    MAX_SPLIT_DEPTH = 4
+    # Chunk size balances round-trip count against output-token budget: with the
+    # compact matching_bom_nos-only schema, num_predict comfortably covers this size.
+    CHUNK_SIZE = 40
+    MAX_SPLIT_DEPTH = 2
+    MAX_WORKERS = 2  # conservative — matches limited concurrent GPU capacity
 
     def _lifecycle_label(self, eol_val: str) -> str:
         v = str(eol_val).strip()
@@ -128,7 +134,7 @@ class ResponseReviewerAgent:
         if v == "Not Found in SE": return "Unknown"
         return v or "Unknown"
 
-    def _call_llm_chunk(self, query: str, chunk: List[Dict], num_predict: int = 512) -> Optional[set]:
+    def _call_llm_chunk(self, query: str, chunk: List[Dict], num_predict: int = 300) -> Optional[set]:
         """
         Send one chunk of rows to the LLM and return the set of matching BOM Nos.
         Returns None on failure so caller can retry/split.
@@ -157,11 +163,12 @@ class ResponseReviewerAgent:
                 {"role": "user",   "content": user_message}
             ],
             "stream": False,
+            "format": "json",   # forces strict JSON output, no stray reasoning text
             "options": {"temperature": 0, "num_predict": num_predict}
         }
 
         try:
-            resp = requests.post(OLLAMA_CHAT_URL, json=payload, timeout=120)
+            resp = requests.post(OLLAMA_CHAT_URL, json=payload, timeout=60)
         except requests.exceptions.ReadTimeout:
             print("[ReviewAgent] Chunk timed out")
             return None
@@ -193,25 +200,7 @@ class ResponseReviewerAgent:
             print("[ReviewAgent] JSON parse error on chunk")
             return None
 
-        # Preferred schema: explicit row decisions.
-        decisions = parsed.get("decisions")
-        if isinstance(decisions, list):
-            kept = set()
-            for d in decisions:
-                if not isinstance(d, dict):
-                    continue
-                if not d.get("keep", False):
-                    continue
-                bom_no = d.get("bom_no")
-                if isinstance(bom_no, int):
-                    kept.add(bom_no)
-                else:
-                    bom_no_str = str(bom_no or "").strip()
-                    if bom_no_str.isdigit():
-                        kept.add(int(bom_no_str))
-            return kept
-
-        # Backward compatibility with older prompt format.
+        # Preferred schema: compact matching_bom_nos list.
         if isinstance(parsed.get("matching_bom_nos"), list):
             return set(parsed.get("matching_bom_nos", []))
 
@@ -222,11 +211,11 @@ class ResponseReviewerAgent:
         Try to review a chunk; on failure, retry with smaller output and then split recursively.
         Returns None if the chunk could not be resolved by the model.
         """
-        result = self._call_llm_chunk(query, chunk, num_predict=512)
+        result = self._call_llm_chunk(query, chunk, num_predict=300)
         if result is not None:
             return result
 
-        result = self._call_llm_chunk(query, chunk, num_predict=256)
+        result = self._call_llm_chunk(query, chunk, num_predict=150)
         if result is not None:
             return result
 
@@ -284,15 +273,23 @@ class ResponseReviewerAgent:
             all_failed = True
             unresolved_chunks = 0
 
-            for idx, chunk in enumerate(chunks, 1):
-                print(f"[ReviewAgent] Chunk {idx}/{total_chunks}: {len(chunk)} rows")
-                result = self._review_chunk_recursive(query, chunk)
-                if result is None:
-                    unresolved_chunks += 1
-                    print(f"[ReviewAgent] Chunk {idx} unresolved — keeping no rows from this chunk")
-                else:
-                    all_failed = False
-                    matching_nos.update(result)
+            import concurrent.futures as _cf_review
+
+            with _cf_review.ThreadPoolExecutor(max_workers=self.MAX_WORKERS) as executor:
+                futures = {
+                    executor.submit(self._review_chunk_recursive, query, chunk): idx
+                    for idx, chunk in enumerate(chunks, 1)
+                }
+                for future in _cf_review.as_completed(futures):
+                    idx = futures[future]
+                    result = future.result()
+                    if result is None:
+                        unresolved_chunks += 1
+                        print(f"[ReviewAgent] Chunk {idx}/{total_chunks} unresolved — keeping no rows from this chunk")
+                    else:
+                        all_failed = False
+                        matching_nos.update(result)
+                        print(f"[ReviewAgent] Chunk {idx}/{total_chunks} done — {len(result)} match(es)")
 
             if all_failed:
                 print("[ReviewAgent] All chunks failed — returning unfiltered data")
@@ -680,7 +677,11 @@ class ResponseFormatterAgent:
                         
                         for api_part_entry in valid_parts:
                             dto = api_part_entry['PartList']['PartDto']
-                            
+                            if isinstance(dto, list):          # SE can return multiple matches
+                                dto = dto[0] if dto else {}
+                            if not isinstance(dto, dict):
+                                continue
+
                             output.append(f"   Part: {dto.get('PartNumber', 'Unknown')}")
                             output.append(f"   Manufacturer: {dto.get('Manufacturer', 'Unknown')}")
                             
@@ -773,34 +774,31 @@ class ResponseFormatterAgent:
             
             return excel_rows
         
-        # Process SiliconExpert API data
-        # Build a lookup: requested_part+manufacturer → BOM part dict (for description fallback)
-        bom_lookup = {}
-        for p in parts_found:
-            for mfr_data in p.get('manufacturers', []):
-                key = (mfr_data.get('mpn', '').strip(), mfr_data.get('manufacturer', '').strip())
-                bom_lookup[key] = (p, mfr_data)
+        # Drive rows from every BOM manufacturer pair and left-join SiliconExpert,
+        # so pairs SE skipped (or whose batch failed) still appear in the output.
+        def _k(part, mfr):
+            return (str(part or '').strip().lower(), str(mfr or '').strip().lower())
 
-        for api_part_entry in part_data_list:
-            if not isinstance(api_part_entry, dict):
-                continue
+        se_lookup = {}
+        for _entry in part_data_list:
+            if isinstance(_entry, dict):
+                se_lookup.setdefault(
+                    _k(_entry.get('RequestedPart'), _entry.get('RequestedManufacturer')), _entry
+                )
 
-            requested_part = api_part_entry.get('RequestedPart', '')
-            requested_mfr  = api_part_entry.get('RequestedManufacturer', '')
+        bom_pairs = [(p, m) for p in parts_found for m in p.get('manufacturers', [])]
 
-            # Get preference from metadata
-            preference = 1
-            metadata = api_data.get('_query_metadata', [])
-            for meta in metadata:
-                if (meta.get('partNumber') == requested_part and
-                        meta.get('manufacturer') == requested_mfr):
-                    preference = meta.get('preference', 1)
-                    break
+        for _bom_src, _mfr_pair in bom_pairs:
+            requested_part = str(_mfr_pair.get('mpn', '') or '').strip()
+            requested_mfr  = str(_mfr_pair.get('manufacturer', '') or '').strip()
+            api_part_entry = se_lookup.get(_k(requested_part, requested_mfr), {})
+            preference     = _mfr_pair.get('preference', 1)
 
             dto = (api_part_entry.get('PartList') or {}).get('PartDto')
-
-            # Look up the original BOM part (for parent PN and LibRef regardless of SE match)
-            _bom_src, _ = bom_lookup.get((requested_part, requested_mfr), ({}, {}))
+            if isinstance(dto, list):
+                dto = dto[0] if dto else None
+            if dto is not None and not isinstance(dto, dict):
+                dto = None
             _src_extra   = _bom_src.get('extra_fields') or {}
             _parent_pn   = _bom_src.get('part_number', '') or requested_part
             _libref      = next(

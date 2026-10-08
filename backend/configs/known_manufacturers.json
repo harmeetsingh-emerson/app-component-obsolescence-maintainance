@@ -1,5 +1,16 @@
 {
   "manufacturers": [
+    "3m",
+    "516897 - 580 valve driver revb",
+    "524264 - onewireatlas580",
+    "536487-001-a - basic: mechanical switch saia / xgo 13-88-s20z1",
+    "536489-003 - basic: namur pepperl & fuchs / nj2-v3-n",
+    "547275 - lbrio lower",
+    "554094 - nvp-canopen",
+    "557520 - inline valve m8",
+    "557959 - new interlox ip65",
+    "560125-001 - dotmatrix display (b)",
+    "572773 - xv-io-gateway",
     "abracon",
     "acme electronics",
     "adi",
@@ -82,6 +93,6 @@
     "xilinx",
     "yageo"
   ],
-  "count": 81,
+  "count": 92,
   "last_updated": "auto-learned from BOM parsing"
 }
