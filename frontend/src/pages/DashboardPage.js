@@ -3,9 +3,9 @@ import { Link as RouterLink, useLocation } from "react-router-dom";
 import { Bar, BarChart, CartesianGrid, Cell, LabelList, ResponsiveContainer, Tooltip as ChartTooltip, XAxis, YAxis } from "recharts";
 import {
   Alert, Box, Button, Chip, Divider, FormControl, IconButton, LinearProgress,
-  MenuItem, Paper, Select, Stack, Table, TableBody, TableCell, TableContainer,
-  TableHead, TableRow, Tooltip, Typography
+  MenuItem, Paper, Select, Stack, Tooltip, Typography
 } from "@mui/material";
+import { MaterialReactTable } from "material-react-table";
 import {
   ArrowBack, Assignment, Autorenew, CheckCircle, Help, Memory, ReceiptLong,
   Settings, ShieldOutlined, Sms, TableChart, ViewModule, Warning
@@ -88,6 +88,40 @@ const formatDate = () => new Date().toLocaleDateString("en-US", {
   year: "numeric",
 });
 
+const STATUS_PRIORITY = { EOL: 0, Unknown: 1, NRND: 2, PCN: 3, Active: 4 };
+
+const tableColumns = [
+  { id: "partNumber", header: "Part Number", accessorFn: getPartNumber, size: 160, Cell: ({ cell }) => <strong>{cell.getValue()}</strong> },
+  { id: "mpn", header: "Manufacturer Part", accessorFn: row => row["Manufacturer Part Number"] || "-", size: 190 },
+  { id: "manufacturer", header: "Manufacturer", accessorFn: row => row["Manufacturer Name"] || "-", size: 170 },
+  { id: "description", header: "Description", accessorFn: row => row.Description || row.PlName || "-", size: 260 },
+  {
+    id: "status",
+    header: "Status",
+    accessorFn: row => normalizeLifecycleStatus(row.EOL, row.YEOL),
+    size: 120,
+    sortingFn: (a, b, columnId) => STATUS_PRIORITY[a.getValue(columnId)] - STATUS_PRIORITY[b.getValue(columnId)],
+    Cell: ({ cell }) => {
+      const status = cell.getValue();
+      const chip = statusColor(status);
+      return <Chip label={status} size="small" sx={{ bgcolor: chip.bg, color: chip.color, fontWeight: 900, minWidth: 68 }} />;
+    },
+  },
+  {
+    id: "yeol",
+    header: "YEOL",
+    accessorFn: row => {
+      const value = Number.parseFloat(row.YEOL);
+      return Number.isNaN(value) ? null : value;
+    },
+    size: 100,
+    sortUndefined: "last",
+    Cell: ({ cell }) => cell.getValue() ?? "-",
+  },
+  { id: "rohs", header: "RoHS", accessorFn: row => row.RoHS || "-", size: 100 },
+  { id: "reason", header: "Reason", accessorFn: getRiskReason, size: 300 },
+];
+
 function readStoredRows() {
   try {
     return JSON.parse(localStorage.getItem("latestDashboardRows") || "[]");
@@ -163,10 +197,6 @@ function DashboardPage({ apiBase, files, initialRows, selectedFilename, onRowsCh
     { status: "EOL", count: metrics.lifecycleCounts.EOL, color: "#ef3124" },
     { status: "PCN", count: metrics.lifecycleCounts.PCN, color: "#ffb000" },
   ];
-  const tableRows = [...rows].sort((left, right) => {
-    const priority = { EOL: 0, Unknown: 1, NRND: 2, PCN: 3, Active: 4 };
-    return priority[normalizeLifecycleStatus(left.EOL, left.YEOL)] - priority[normalizeLifecycleStatus(right.EOL, right.YEOL)];
-  });
 
   return (
     <Box sx={{ minHeight: "100vh", bgcolor: "#1e1f21", p: { xs: 1.5, md: 3 } }}>
@@ -325,7 +355,7 @@ function DashboardPage({ apiBase, files, initialRows, selectedFilename, onRowsCh
                       <Autorenew />
                     </IconButton>
                   </Tooltip>
-                  <Settings sx={{ color: "#244d7d" }} />
+                  {/* <Settings sx={{ color: "#244d7d" }} /> */}
                 </Stack>
               </Stack>
 
@@ -352,51 +382,39 @@ function DashboardPage({ apiBase, files, initialRows, selectedFilename, onRowsCh
               </Alert>
             )}
 
-            <TableContainer sx={{ px: 0, maxHeight: 540, width: "100%" }}>
-              <Table size="small" sx={{ tableLayout: "fixed", minWidth: 1280, width: "100%" }}>
-                <TableHead>
-                  <TableRow sx={{ bgcolor: "#526786" }}>
-                    {["Part Number", "Manufacturer Part", "Manufacturer", "Description", "Status", "YEOL","RoHS", "Reason"].map(header => (
-                      <TableCell key={header} sx={{ color: "#fff", fontWeight: 900, fontSize: 15, borderColor: "#8fa0b8", position: "sticky", top: 0, zIndex: 1, bgcolor: "#526786" }}>{header}</TableCell>
-                    ))}
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {tableRows.map((row, index) => {
-                    const status = normalizeLifecycleStatus(row.EOL, row.YEOL);
-                    const chip = statusColor(status);
-                    return (
-                      <TableRow key={`${getPartNumber(row)}-${row["Manufacturer Part Number"] || "mpn"}-${index}`} sx={{ bgcolor: index % 2 ? "#f4f6f9" : "#fff" }}>
-                        <TableCell sx={{ fontWeight: 900 }}>{getPartNumber(row)}</TableCell>
-                        <TableCell sx={{ fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row["Manufacturer Part Number"] || "-"}</TableCell>
-                        <TableCell sx={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row["Manufacturer Name"] || "-"}</TableCell>
-                        <TableCell sx={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.Description || row.PlName || "-"}</TableCell>
-                        <TableCell>
-                          <Chip label={status} size="small" sx={{ bgcolor: chip.bg, color: chip.color, fontWeight: 900, minWidth: 68 }} />
-                        </TableCell>
-                        <TableCell sx={{ fontWeight: 700 }}>{row.YEOL || "-"}</TableCell>
-                        <TableCell sx={{ fontWeight: 700 }}>{row.RoHS || "-"}</TableCell>
-                        <TableCell sx={{ fontSize: 12, color: "#334155" }}>{getRiskReason(row)}</TableCell>
-                      </TableRow>
-                    );
-                  })}
-                  {!loading && tableRows.length === 0 && (
-                    <TableRow>
-                      <TableCell colSpan={8} sx={{ py: 4, textAlign: "center", color: "text.secondary" }}>  No dashboard rows available yet.
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </TableContainer>
+            <Box sx={{ px: 2.3, pb: 2 }}>
+              <MaterialReactTable
+                columns={tableColumns}
+                data={rows}
+                state={{ isLoading: loading }}
+                initialState={{
+                  density: "compact",
+                  showGlobalFilter: true,
+                  sorting: [{ id: "status", desc: false }],
+                  pagination: { pageIndex: 0, pageSize: 25 },
+                }}
+                enableStickyHeader
+                enableColumnResizing={false}
+                muiPaginationProps={{ rowsPerPageOptions: [10, 25, 50, 100], variant: "outlined" }}
+                muiSearchTextFieldProps={{ placeholder: "Search all columns", variant: "outlined", size: "small" }}
+                muiTableContainerProps={{ sx: { maxHeight: 540 } }}
+                muiTableHeadCellProps={{ sx: { bgcolor: "#526786", color: "#fff", fontWeight: 900, "& .MuiTableSortLabel-root, & .MuiTableSortLabel-icon": { color: "#fff !important" } } }}
+                muiTableBodyRowProps={({ row }) => ({ sx: { bgcolor: row.index % 2 ? "#f4f6f9" : "#fff" } })}
+                renderEmptyRowsFallback={() => (
+                  <Typography sx={{ py: 4, textAlign: "center", color: "text.secondary" }}>
+                    No dashboard rows available yet.
+                  </Typography>
+                )}
+              />
+            </Box>
 
-            <Box sx={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", bgcolor: "#d9e2ef", borderTop: "1px solid #b8c6d8", mt: 2 }}>
+            {/* <Box sx={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", bgcolor: "#d9e2ef", borderTop: "1px solid #b8c6d8", mt: 2 }}>
               {[TableChart, ViewModule, Memory, Sms].map((Icon, index) => (
                 <Box key={index} sx={{ display: "flex", justifyContent: "center", py: 1, borderLeft: index ? "2px solid #b8c6d8" : "none" }}>
                   <Icon sx={{ color: "#244d7d", fontSize: 28 }} />
                 </Box>
               ))}
-            </Box>
+            </Box> */}
           </Paper>
         </Box>
       </Box>
